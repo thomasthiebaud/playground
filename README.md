@@ -1,8 +1,16 @@
 # playground
 
-This project uses [DotSlash](https://dotslash-cli.com) to manage **Buck2**. This ensures everyone uses the exact same version without manual installation or compilation errors.
+A monorepo for hands-on systems engineering experiments. Each project is self-contained under `projects/`.
 
-## Installation
+## Projects
+
+| Project | Description |
+|---------|-------------|
+| [llm-inference-gateway](projects/llm-inference-gateway/) | LLM inference optimization, load balancing, and traffic management using Ollama |
+
+## Setup
+
+This project uses [DotSlash](https://dotslash-cli.com) to manage **Buck2**. This ensures everyone uses the exact same version without manual installation or compilation errors.
 
 ### 1. Install Rust & Cargo
 
@@ -37,11 +45,3 @@ The `buck2` file in this repository is a DotSlash configuration. It is already c
 | `./buck2 build //...`          | Build everything |
 | `./buck2 run //path/to:target` | Run a target    |
 | `./buck2 test //...`           | Test everything |
-
-## Why is `buck2` a JSON file in the repo?
-
-We commit the `buck2` DotSlash file to the repository to ensure version pinning:
-
-- **Zero-Config**: New contributors just clone the repo and run `./buck2`.
-- **Platform Agnostic**: The same file fetches the correct binary for macOS (Intel/ARM) or Linux automatically.
-- **Consistency**: Every developer and the CI/CD pipeline use the exact same tool version.
