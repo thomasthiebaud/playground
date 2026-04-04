@@ -6,7 +6,7 @@ A monorepo for hands-on systems engineering experiments. Each project is self-co
 
 | Project | Description |
 |---------|-------------|
-| [llm-local-inference](projects/llm-local-inference/) | LLM inference gateway — start with Docker Model Runner, then build your own backend with llama.cpp |
+| [llm-local-inference](projects/llm-local-inference/) | Zero-to-hero LLM inference — transformer mechanics, llama.cpp, batching, routing, fleet orchestration |
 
 ## Future Work
 

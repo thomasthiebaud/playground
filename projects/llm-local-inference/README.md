@@ -1,17 +1,18 @@
-# LLM Local Inference
+# LLM Inference — Zero to Hero
 
-Build an LLM inference gateway from scratch. Start with [Docker Model Runner](https://docs.docker.com/desktop/features/model-runner/) — Docker Desktop's built-in inference engine — to get running fast, then build your own inference backend with [llama.cpp](https://github.com/ggerganov/llama.cpp) to understand what's under the hood and scale it out.
+A structured learning path for LLM inference systems engineering. Covers the full stack from transformer mechanics to fleet orchestration — the skills needed to build and operate inference infrastructure at scale.
 
-**Language:** Go
-**Build:** Buck2 (`genrule`)
-**Runtime:** Docker Desktop with Model Runner enabled, later self-hosted llama.cpp
+**Language:** Rust (gateway), C/C++ (llama.cpp)
+**Build:** Buck2, Cargo
+**Runtime:** Docker Desktop with Model Runner, self-hosted llama.cpp
 
 ## Prerequisites
 
 - Docker Desktop 4.40+ with Model Runner enabled
-- Go 1.22+
+- Rust 1.75+ (install via [rustup](https://rustup.rs))
+- C/C++ toolchain (`gcc`/`clang`, `cmake`, `make`)
 - Buck2 (available as `./buck2` at repo root)
-- C/C++ toolchain (for Part 3 — `gcc`/`clang`, `cmake`, `make`)
+- Python 3.11+ (for benchmarking scripts and vLLM in Part 4)
 
 ### Enable Docker Model Runner
 
@@ -24,51 +25,75 @@ docker model list
 
 ### Reference Docs
 
-Keep these open — you'll need them throughout:
-
 - [Docker Model Runner docs](https://docs.docker.com/desktop/features/model-runner/)
-- [Docker `model` CLI reference](https://docs.docker.com/reference/cli/docker/model/)
 - [OpenAI Chat Completions API reference](https://platform.openai.com/docs/api-reference/chat/completions)
 - [llama.cpp documentation](https://github.com/ggerganov/llama.cpp)
 - [llama-server documentation](https://github.com/ggerganov/llama.cpp/tree/master/examples/server)
 - [GGUF format spec](https://github.com/ggerganov/ggml/blob/master/docs/gguf.md)
-- [Docker Compose reference](https://docs.docker.com/reference/compose-file/)
-- [Dockerfile reference](https://docs.docker.com/reference/dockerfile/)
+- [vLLM documentation](https://docs.vllm.ai/)
+- [Efficient Memory Management for Large Language Model Serving with PagedAttention](https://arxiv.org/abs/2309.06180)
+- [Orca: A Distributed Serving System for Transformer-Based Generative Models](https://www.usenix.org/conference/osdi22/presentation/yu)
 - [Buck2 `genrule` docs](https://buck2.build/docs/prelude/globals/#genrule)
 
 ---
 
-## Part 0: Setup
+## Part 0: How LLM Inference Works
 
-### 0.1 — Pull a Model
+Before writing any infrastructure code, understand what you're optimizing for.
 
-Pull a small model that runs well on CPU:
+### 0.1 — Transformer Inference Phases
 
-```bash
-docker model pull ai/llama3.2:1B-Q8_0
-```
+Read and understand the two distinct phases of autoregressive LLM inference:
 
-**Verify:**
-- `docker model list` shows `ai/llama3.2:1B-Q8_0`
-- `curl http://localhost:12434/v1/models` returns a JSON response listing the model
-- `curl http://localhost:12434/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"ai/llama3.2:1B-Q8_0","messages":[{"role":"user","content":"Say hello in one word"}]}'` returns a valid chat completion response
+1. **Prefill** (prompt processing): all input tokens are processed in parallel to build the KV cache
+2. **Decode** (token generation): tokens are generated one at a time, each attending to the full KV cache
+
+Research these concepts using the papers linked above, blog posts, and the llama.cpp source code.
+
+**Acceptance criteria — you can answer:**
+- Why is prefill compute-bound and decode memory-bandwidth-bound?
+- What is the KV cache? How does its memory grow with sequence length and batch size?
+- What determines tokens-per-second during decode? (hint: it's not FLOPs)
+- Why does a longer context window cost more memory but not proportionally more compute during decode?
+- What is the difference between `prompt_tokens` and `completion_tokens` in terms of computational cost?
 
 ---
 
-### 0.2 — Buck2 Build Target
+### 0.2 — Quantization
 
-Write a `BUCK` file in this project directory with a `genrule` that:
-- Takes your Go source files as inputs (use `glob`)
-- Runs `go build` to produce a binary
-- Marks the output as executable
+Pull two versions of the same model:
 
-You'll need a `src/main.go` with a basic "hello world" HTTP server to test it.
-
-**Verify:**
 ```bash
-./buck2 build //projects/llm-local-inference:gateway
-./buck2 run //projects/llm-local-inference:gateway
+docker model pull ai/llama3.2:1B-Q4_K_M
+docker model pull ai/llama3.2:1B-Q8_0
 ```
+
+Send the same prompts to both. Compare output quality, speed, and memory usage.
+
+**Acceptance criteria:**
+- You can explain what quantization does (reduce weight precision from FP16 → INT8/INT4)
+- You've measured tokens/sec for Q4_K_M vs Q8_0 on the same hardware
+- You can articulate the quality/speed/memory trade-off
+- You understand what "K-quant" means in GGUF quantization names (hint: read the GGUF spec)
+- You can answer: when would you choose Q4 over Q8? When would neither be acceptable?
+
+---
+
+### 0.3 — Benchmarking Fundamentals
+
+Before building anything, establish your measurement toolkit. Write a Python script that:
+- Sends requests to `http://localhost:12434/v1/chat/completions`
+- Measures: time to first token (TTFT), time per output token (TPOT), end-to-end latency, tokens/sec
+- Supports both streaming and non-streaming
+- Runs N concurrent requests and reports p50, p95, p99
+
+You'll reuse this throughout every exercise.
+
+**Acceptance criteria:**
+- Script can benchmark any OpenAI-compatible endpoint
+- Outputs a clean table with TTFT, TPOT, throughput, and latency percentiles
+- You understand why TTFT and TPOT are the two metrics that matter most for user experience
+- You can answer: why does TTFT increase with prompt length? Why does TPOT stay roughly constant regardless of prompt length?
 
 ### OpenAI Chat Completions Cheat Sheet
 
@@ -91,18 +116,6 @@ curl -N http://localhost:12434/v1/chat/completions \
     "stream": true
   }'
 
-# With system prompt
-curl http://localhost:12434/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "ai/llama3.2:1B-Q8_0",
-    "messages": [
-      {"role": "system", "content": "You are a helpful assistant."},
-      {"role": "user", "content": "What is 2+2?"}
-    ],
-    "stream": false
-  }'
-
 # List available models
 curl http://localhost:12434/v1/models
 ```
@@ -111,363 +124,423 @@ Key response fields: `choices[0].message.content` (non-streaming), `choices[0].d
 
 ---
 
-## Part 1: Inference Optimization
+## Part 1: Build and Understand a Single Inference Server
 
-### 1.1 — Proxy to Model Runner
+### 1.1 — Build llama.cpp from Source
 
-Build an HTTP server that accepts POST requests on `/v1/chat/completions` and proxies them to Docker Model Runner at `http://localhost:12434`.
-
-Your server should:
-- Forward the request as-is (Model Runner already speaks OpenAI format)
-- Stream SSE responses back to the client
-- Log the model name, `prompt_tokens`, `completion_tokens`, and `total_tokens` from the response
-
-Update your BUCK target to build this.
-
-**Goal:** Get a working baseline. Write a benchmark script that fires 10 concurrent requests and measures total time, per-request latency, and throughput (requests/sec).
-
----
-
-### 1.2 — Request Queuing
-
-Model Runner handles concurrency internally, but you want to control admission from your gateway.
-
-**Build a request queue:**
-- Incoming requests are placed in a FIFO queue
-- A configurable number of workers (start with 1) pull from the queue and forward to Model Runner
-- Track and log: queue depth, wait time (time in queue before forwarding), total latency
-
-**Experiment:**
-- Vary worker count (1, 2, 4) and benchmark at each level
-- Compare throughput and latency vs your 1.1 baseline
-
-Questions to answer:
-1. What happens to p99 latency as you increase concurrent workers beyond what the backend can handle?
-2. What's the relationship between queue depth and latency?
-3. Why would you want your proxy to limit concurrency rather than letting the backend queue grow unbounded?
-
----
-
-### 1.3 — Prompt Prefix Caching
-
-Many requests share common prefixes (e.g., a system prompt). LLM backends can reuse KV cache for repeated prefixes, skipping re-evaluation of cached tokens.
-
-**Build a prefix-aware cache layer:**
-- Maintain a map of `hash(system_prompt) → recent_response_stats`
-- Route requests with the same system prompt consistently (this helps the backend's internal KV cache)
-- Log `prompt_tokens` and total latency — when the KV cache hits, prompt evaluation should be faster
-
-**Test it:**
-1. Send 20 requests all using the same system prompt but different user messages
-2. Send 20 requests each with a unique system prompt
-3. Compare latency between the two groups
-
-Questions:
-1. How significant is the speedup from prefix caching in practice?
-2. What happens to the cache when you switch between different system prompts rapidly?
-
----
-
-### 1.4 — Response Caching
-
-Exact same prompt → exact same answer (when temperature=0).
-
-**Add a response cache:**
-- Hash the full request (model + messages + parameters)
-- If you've seen this exact request before and `temperature` is 0, return the cached response immediately without hitting the backend
-- Use an LRU cache with configurable max entries
-- Track and expose: cache hit rate, cache size, estimated time saved
-
-**Test it:** send a burst of 50 identical requests. How does latency compare for cache hits vs misses?
-
-Questions:
-1. When is response caching safe vs dangerous?
-2. How would you handle cache invalidation when the model is updated?
-3. What's the memory cost trade-off?
-
----
-
-## Part 2: Traffic Management
-
-### 2.1 — Rate Limiting
-
-Add rate limiting to your proxy.
-
-- Token bucket algorithm: each client (identified by an `X-API-Key` header) gets a bucket
-- Bucket capacity: 10 requests, refill rate: 2 requests/sec
-- Return 429 Too Many Requests when the bucket is empty
-
-Implement the token bucket yourself — don't use a library.
-
----
-
-### 2.2 — Priority Queues
-
-Not all requests are equal. Add priority support.
-
-- Requests include a `"priority": "high" | "normal" | "low"` field
-- The proxy maintains separate queues per priority
-- High-priority requests are forwarded first, even if normal/low arrived earlier
-- Low-priority requests can be shed (return 503) if total queue depth exceeds a threshold
-
-**Test:** saturate the system with low-priority requests, then send a high-priority one. Measure how long the high-priority request waits.
-
----
-
-### 2.3 — Adaptive Concurrency Limiting
-
-Fixed concurrency limits are fragile. Implement an adaptive limit.
-
-- Start with a concurrency limit of 5
-- Track request latency over a rolling window (last 50 requests)
-- If p99 latency rises above a threshold (e.g., 2x your observed baseline), reduce the limit by 1
-- If p99 is healthy, increase by 1
-- Never go below 1 or above 20
-
-This is a simplified version of Netflix's [adaptive concurrency limiter](https://netflixtechblog.medium.com/performance-under-load-3e6fa9a60581).
-
-**Test:** gradually increase load and observe the limiter adapting. Log the concurrency limit over time.
-
----
-
-### 2.4 — Request Coalescing
-
-Multiple users often send the exact same prompt.
-
-**Implement deduplication:**
-- Hash the full request body
-- If an identical request is already in-flight, don't send a second one to the backend — wait for the first to complete and return the same response to both clients
-- Add a short TTL cache for completed responses (e.g., 10 seconds)
-
-**Test:** fire 10 identical requests simultaneously. Only 1 should hit the backend.
-
-Questions:
-1. When is this safe to do? When is it dangerous?
-2. How does this interact with non-deterministic generation (temperature > 0)?
-
----
-
-## Part 3: Build It Yourself with llama.cpp
-
-Docker Model Runner runs inference for you. Now build your own inference backend to understand what's happening inside.
-
-### 3.1 — Build llama.cpp from Source
-
-Clone [llama.cpp](https://github.com/ggerganov/llama.cpp) and build it. The project uses `cmake`.
-
-Focus on getting `llama-server` built — the HTTP server component that exposes an OpenAI-compatible API.
+Clone [llama.cpp](https://github.com/ggerganov/llama.cpp) and build it. Focus on `llama-server`.
 
 **Acceptance criteria:**
-- `llama-server --help` works and shows available flags
-- You understand what these build flags do: `-DGGML_CUDA=ON`, `-DGGML_METAL=ON`, `-DGGML_CPU_ALL_VARIANTS=ON` (read the docs, you may not have all the hardware)
-- You can explain: what is GGML and how does it relate to llama.cpp?
+- `llama-server --help` works
+- You understand these build flags: `-DGGML_CUDA=ON`, `-DGGML_METAL=ON`, `-DGGML_CPU_ALL_VARIANTS=ON`
+- You can explain: what is GGML? How does it relate to llama.cpp? What computation backends does it support?
 
 ---
 
-### 3.2 — Download a GGUF Model & Serve It
+### 1.2 — Serve a Model
 
-Docker Model Runner pulls models via `docker model pull` from OCI registries. For llama.cpp, you need a raw GGUF file.
-
-Find and download the same model you used with Model Runner (`llama3.2 1B`) in GGUF format. Start `llama-server` with it.
-
-Hints: Hugging Face hosts GGUF files. Look for the quantization that matches what you pulled earlier (Q8_0).
+Download the same model you used with Model Runner (Llama 3.2 1B, Q8_0 quantization) as a GGUF file from Hugging Face. Start `llama-server` with it.
 
 **Acceptance criteria:**
-- `llama-server` is running and serving on port 8081
-- `curl http://localhost:8081/v1/models` returns a response
-- `curl http://localhost:8081/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"llama3.2","messages":[{"role":"user","content":"Hello"}]}'` returns a valid response
-- The same curl command format works against both Model Runner (port 12434) and your llama-server (port 8081)
+- `llama-server` running on port 8081
+- Same curl commands work against both Model Runner (:12434) and your server (:8081)
+- Run your benchmark script from 0.3 against both — compare numbers
 
 ---
 
-### 3.3 — Understand the Serving Parameters
+### 1.3 — Slots and Continuous Batching
 
-`llama-server` has many knobs that affect performance. Experiment with these flags and observe the impact:
+`llama-server` uses **slots** — fixed context windows that requests are assigned to. This is its batching mechanism.
 
-- `-c` (context size)
+Experiment with these flags:
+
+- `-c` (total context size across all slots)
 - `-np` (number of parallel slots)
-- `-ngl` (number of GPU layers — if you have a GPU)
+- `--batch-size` / `-b` (tokens processed per batch during prefill)
 - `--threads` / `-t`
-- `--batch-size` / `-b`
 
 **Acceptance criteria:**
-- Run a fixed benchmark (same prompt, 10 requests) under at least 3 different configurations (vary context size, thread count, parallel slots)
-- Record tokens/second for each configuration
-- You can answer: What is a "slot" in llama-server? What happens when all slots are busy? How does context size affect memory usage and speed?
+- Benchmark with `-np 1` vs `-np 2` vs `-np 4` at 10 concurrent requests each
+- You can answer:
+  - What is a "slot"? What happens when all slots are busy?
+  - How does `-c` interact with `-np`? (hint: context is divided among slots)
+  - What is continuous batching and why does it matter? How is it different from static batching?
+  - Read the Orca paper (linked above) — what problem does iteration-level scheduling solve?
 
 ---
 
-### 3.4 — Containerize llama-server
+### 1.4 — KV Cache Mechanics
 
-Write a Dockerfile that builds llama.cpp from source and produces an image with `llama-server`. The model GGUF file should be provided at runtime via a volume mount, not baked into the image.
+Observe KV cache behavior in llama-server by watching its logs and `/health` endpoint.
+
+**Experiments:**
+1. Send 20 requests with the same system prompt, different user messages. Note prompt processing speed.
+2. Send 20 requests each with unique system prompts. Compare.
+3. Use `--cache-type-k q8_0` and `--cache-type-v q8_0` flags — measure memory and quality impact.
+
+**Acceptance criteria:**
+- You can explain how prefix caching works at the KV cache level
+- You understand why quantizing the KV cache saves memory (and how much, approximately)
+- You can answer: if a model has 32 layers, 32 attention heads, and head dimension 64, how much KV cache memory does a single token consume in FP16? In Q8_0?
+
+---
+
+### 1.5 — Structured Output (Constrained Decoding)
+
+llama-server supports grammar-constrained generation via the `response_format` field (JSON mode) and GBNF grammars.
+
+**Experiments:**
+1. Send a request with `"response_format": {"type": "json_object"}` — observe the output
+2. Write a GBNF grammar that constrains output to a specific JSON schema (e.g., `{"name": string, "age": number}`)
+3. Benchmark: how does constrained decoding affect tokens/sec vs unconstrained?
+
+**Acceptance criteria:**
+- You can generate valid JSON reliably using grammar-constrained decoding
+- You understand how constrained decoding works (hint: it masks logits for invalid next tokens at each step)
+- You can answer: why doesn't constrained decoding reduce output quality? What's the performance cost?
+- You know what GBNF is and how it relates to context-free grammars
+
+---
+
+### 1.6 — Containerize llama-server
+
+Write a Dockerfile that builds llama.cpp from source. Model files should be mounted at runtime, not baked in.
 
 **Acceptance criteria:**
 - `docker build -t llama-server .` succeeds
-- `docker run -v /path/to/models:/models -p 8081:8081 llama-server -m /models/llama3.2-1B-Q8_0.gguf --host 0.0.0.0 --port 8081` starts serving
-- Image builds are reproducible (pinned base image, specific llama.cpp commit)
-- You can answer: why mount the model as a volume instead of `COPY` in the Dockerfile?
+- `docker run -v /path/to/models:/models -p 8081:8081 llama-server -m /models/<model>.gguf --host 0.0.0.0 --port 8081` serves requests
+- Pinned base image and llama.cpp commit for reproducibility
+- You can answer: why volume-mount models instead of COPY? (hint: image size, model versioning, multi-model serving)
 
 ---
 
-## Part 4: Load Balancing
+## Part 2: The Gateway
 
-Now that you can run your own inference backends, scale out to multiple instances.
+Build an inference gateway in Rust. This is the routing and traffic management layer that sits between clients and backends.
 
-### 4.1 — Multi-Backend Docker Setup
+### 2.1 — Proxy with Streaming
 
-Update your `docker-compose.yml` to run 3 llama-server instances on different ports (8081, 8082, 8083). Each needs the same model mounted.
+Build an HTTP server in Rust that:
+- Accepts `POST /v1/chat/completions` in OpenAI format
+- Forwards to Docker Model Runner at `http://localhost:12434`
+- Streams SSE responses back to the client
+- Logs model, token counts, and latency
 
-**Verify:** all three instances respond to `/v1/models`.
+Use `tokio`, `hyper` or `axum`, and `reqwest`. Set up a Cargo workspace in `src/`.
 
----
-
-### 4.2 — Round Robin
-
-Build a reverse proxy that distributes requests across your llama-server instances.
-
-- Accept requests on a single port
-- Forward to backends in round-robin order
-- Stream SSE responses back to the client
-- Log which backend handled each request
-
-**Keep it simple.** No health checks yet.
+**Acceptance criteria:**
+- Streaming and non-streaming requests both work through your proxy
+- Your benchmark script from 0.3 works against the proxy
+- Proxy adds < 5ms overhead vs hitting Model Runner directly
 
 ---
 
-### 4.3 — Least Connections
+### 2.2 — Request Queuing & Admission Control
 
-Round-robin is blind to load. A request generating 500 tokens ties up a backend much longer than one generating 50.
+Add a bounded queue in front of the backend.
 
-**Change your strategy:**
-- Track how many in-flight requests each backend has
-- Route to the backend with the fewest in-flight requests
-- Decrement when the response completes
+- FIFO queue with configurable max depth
+- Configurable worker count pulling from the queue
+- Track: queue depth, wait time, total latency
+- Return 503 when queue is full (backpressure)
 
-**Test:** send a mix of short (`max_tokens: 10`) and long (`max_tokens: 200`) requests. Compare p50 and p99 latency vs round-robin.
+**Experiment:** vary worker count (1, 2, 4) and benchmark.
 
----
-
-### 4.4 — Health Checks and Failover
-
-Backends crash. Handle it.
-
-- Every 5 seconds, send a GET to each backend's `/v1/models` endpoint
-- If a backend fails 3 consecutive health checks, remove it from the pool
-- If it later passes a health check, re-add it
-- While a backend is marked unhealthy, don't route to it
-
-**Test:** `docker compose stop llama-2`, observe routing around it. `docker compose start llama-2`, observe it rejoining.
+**Acceptance criteria:**
+- You can answer:
+  - Why limit concurrency at the proxy instead of letting the backend queue grow?
+  - What happens to tail latency as queue depth grows?
+  - How would you choose the right queue depth and worker count for production?
 
 ---
 
-### 4.5 — Prefix-Aware Routing (LLM-specific)
+### 2.3 — Response Caching
 
-This is where LLM load balancing diverges from generic load balancing.
+Add an LRU response cache:
+- Key: hash of (model + messages + temperature + other deterministic params)
+- Only cache when temperature=0
+- Configurable max entries
+- Track hit rate and estimated time saved
 
-If two requests share the same system prompt, routing them to the **same backend** means that backend's KV cache gets a hit. Routing them to different backends means both compute the prefix from scratch.
+**Test:** 50 identical requests — only 1 should hit the backend.
 
-**Implement consistent hashing on the prompt prefix:**
-- Hash the system message content
-- Use that hash to pick a backend (consistent hashing ring)
-- Fall back to least-connections if the target backend is overloaded (>2x average in-flight count)
+---
 
-**Test:**
-- Send 30 requests with system prompt A, 30 with system prompt B
-- Compare latency with prefix-aware routing vs round-robin
-- You should see measurably lower latency with prefix-aware routing for same-prefix requests
+### 2.4 — Rate Limiting
+
+Implement token bucket rate limiting per client (`X-API-Key` header):
+- Bucket capacity: 10 requests, refill: 2/sec
+- Return 429 when empty
+
+Implement from scratch — no library.
+
+---
+
+### 2.5 — Priority Queues
+
+Replace FIFO with priority queuing:
+- `"priority": "high" | "normal" | "low"` in the request
+- High goes first, low gets shed (503) when queue exceeds threshold
+
+**Test:** saturate with low-priority, send high-priority — measure wait time.
+
+---
+
+### 2.6 — Request Coalescing
+
+Deduplicate identical in-flight requests:
+- Hash the request body
+- If same request is already in-flight, wait for it instead of sending a duplicate
+- Short TTL cache (10s) for completed responses
+
+**Test:** 10 identical concurrent requests — only 1 hits the backend.
+
+Questions:
+1. When is coalescing safe? When is it dangerous?
+2. How does temperature > 0 interact with this?
+
+---
+
+## Part 3: Multi-Backend Routing
+
+Scale to multiple inference servers and route intelligently.
+
+### 3.1 — Multi-Backend Setup
+
+Update `docker-compose.yml` to run 3 llama-server instances (ports 8081–8083), each with the same model mounted.
+
+**Verify:** all three respond to `/v1/models`.
+
+---
+
+### 3.2 — Round Robin
+
+Distribute requests across backends in round-robin order. Stream responses back. Log which backend handled each request.
+
+---
+
+### 3.3 — Least Connections
+
+Track in-flight requests per backend. Route to the one with the fewest.
+
+**Test:** mix of short and long requests. Compare p50/p99 vs round-robin.
+
+---
+
+### 3.4 — Health Checks & Failover
+
+- Poll `/v1/models` every 5 seconds
+- Remove after 3 consecutive failures, re-add when healthy
+- Never route to unhealthy backends
+
+**Test:** stop a backend, observe routing. Restart it, observe re-addition.
+
+---
+
+### 3.5 — Prefix-Aware Routing
+
+Route requests with the same system prompt to the same backend to maximize KV cache hits.
+
+- Consistent hash on system message content
+- Fall back to least-connections if target is overloaded (>2x average in-flight)
+
+**Test:** 30 requests with system prompt A, 30 with B. Compare latency vs round-robin — prefix-aware should win on same-prefix requests.
 
 Questions:
 1. What's the trade-off between cache hit rate and load balance?
-2. When would you prefer pure least-connections over prefix-aware routing?
+2. When would pure least-connections beat prefix-aware?
 
 ---
 
-## Part 5: Putting It Together
+### 3.6 — Multi-Model Routing
+
+Pull a second model:
+
+```bash
+docker model pull ai/llama3.2:3B-Q4_K_M
+```
+
+Run one llama-server instance with the 1B model, another with the 3B model. Add routing logic:
+- If the request specifies a model, route to the matching backend
+- If the model isn't available, return 404 with available models
+- Add a `GET /v1/models` endpoint that aggregates across all backends
+
+**Acceptance criteria:**
+- Different models are served by different backends
+- Client gets a unified model list from the gateway
+- You can answer: how does model-aware routing interact with autoscaling? (scaling each model pool independently)
+
+---
+
+## Part 4: Deep Dive — Batching and PagedAttention
+
+This is the most important section for understanding modern inference systems.
+
+### 4.1 — Study: Static vs Continuous Batching
+
+Read the [Orca paper](https://www.usenix.org/conference/osdi22/presentation/yu) and understand why iteration-level scheduling matters.
+
+**Acceptance criteria — you can explain:**
+- In static batching, why does the shortest request in a batch waste compute while waiting for the longest?
+- How does continuous batching (iteration-level scheduling) solve this?
+- What is the relationship between batch size and throughput? Between batch size and per-request latency?
+- Draw the timeline of 4 requests with different lengths under static batching vs continuous batching
+
+---
+
+### 4.2 — Study: PagedAttention and vLLM
+
+Read the [PagedAttention paper](https://arxiv.org/abs/2309.06180) and explore [vLLM](https://docs.vllm.ai/).
+
+**Acceptance criteria — you can explain:**
+- What problem does PagedAttention solve? (hint: KV cache memory fragmentation)
+- How does paging work for KV cache? How is it analogous to OS virtual memory?
+- What is the memory waste from internal/external fragmentation in naive KV cache allocation?
+- How does prefix caching work in vLLM? How is it different from llama.cpp's approach?
+
+---
+
+### 4.3 — Run vLLM (Optional, GPU required)
+
+If you have a GPU, install and run vLLM:
+
+```bash
+pip install vllm
+vllm serve meta-llama/Llama-3.2-1B --dtype auto
+```
+
+vLLM exposes the same OpenAI-compatible API. Point your benchmark script at it.
+
+**Acceptance criteria:**
+- Compare tokens/sec between vLLM, llama-server, and Docker Model Runner for the same model
+- You can answer: why is vLLM typically faster than llama.cpp for batched workloads? (hint: PagedAttention, CUDA kernels)
+- Observe vLLM's `--max-num-seqs` (max batch size) — how does it affect throughput vs latency?
+
+---
+
+### 4.4 — Speculative Decoding (Conceptual)
+
+Research speculative decoding — a technique for faster inference without quality loss.
+
+**Acceptance criteria — you can explain:**
+- How does speculative decoding use a smaller "draft" model to speed up a larger "target" model?
+- Why does it produce identical output to running the target model alone?
+- What is the acceptance rate and how does it affect speedup?
+- When does speculative decoding help most? When does it hurt?
+- How would you integrate this into your gateway? (hint: model pair routing)
+
+---
+
+## Part 5: Fleet Orchestration
 
 ### 5.1 — Containerize the Gateway
 
-Write a `Dockerfile` for your Go gateway using a multi-stage build:
-- Build stage: compile the binary
-- Runtime stage: minimal image with just the binary
+Multi-stage Dockerfile for your Rust gateway:
+- Build stage: compile with `cargo build --release`
+- Runtime stage: minimal image (`debian-slim` or `distroless`) with just the binary
 
-Add the gateway service to your `docker-compose.yml` so it starts alongside the llama-server backends. The gateway should connect to backends via Docker's internal network (service names), not localhost.
-
-**Verify:** `docker compose up -d` starts everything. Requests to the gateway port get proxied to backends.
-
----
-
-### 5.2 — Compose Profiles: Model Runner vs Self-Hosted
-
-Add Docker Compose profiles so you can choose your backend:
-
-- `docker compose --profile model-runner up -d` — starts only the gateway, pointing at `model-runner.docker.internal`
-- `docker compose --profile self-hosted up -d` — starts the gateway + 3 llama-server instances
-
-Both profiles serve the same API to clients on the same port.
-
-**Questions to answer:** what are the operational trade-offs? (image size, startup time, resource usage, configuration complexity, scaling)
+**Acceptance criteria:**
+- Image size under 20MB
+- `docker compose up -d` starts gateway + llama-server backends
+- Gateway connects to backends via Docker internal network (service names)
 
 ---
 
-### 5.3 — Full Stack
+### 5.2 — Compose Profiles
 
-Wire everything together into a single self-hosted system:
+Add profiles so you can choose your backend:
+
+- `docker compose --profile model-runner up -d` — gateway only, pointing at `model-runner.docker.internal`
+- `docker compose --profile self-hosted up -d` — gateway + 3 llama-server instances
+
+Both serve the same API on the same port.
+
+Questions: what are the operational trade-offs? (startup time, resource usage, scaling, debugging)
+
+---
+
+### 5.3 — Autoscaling Signals
+
+Expose a `/metrics` endpoint (Prometheus format) reporting:
+- Request queue depth
+- In-flight requests per backend
+- p99 latency (rolling 60-second window)
+- Cache hit rate
+- Per-backend prompt processing time (KV cache effectiveness signal)
+
+Implement a simple autoscaler controller:
+- If queue depth > threshold for 30 seconds → log `SCALE_UP`
+- If all backends idle for 60 seconds → log `SCALE_DOWN`
+
+**Acceptance criteria:**
+- Your metrics endpoint returns valid Prometheus exposition format
+- You can answer:
+  - What metrics would you use to decide when to scale an inference fleet?
+  - Why is queue depth alone insufficient? (hint: it doesn't distinguish between a burst and sustained overload)
+  - What's the cold start cost of adding a new inference backend? How does model loading time affect scaling decisions?
+
+---
+
+### 5.4 — Deployment Strategies (Conceptual)
+
+You're deploying a new model version to a fleet serving production traffic. Research and design strategies for:
+
+1. **Blue/green deployment** — how do you cut over from model v1 to v2?
+2. **Canary deployment** — how do you gradually shift traffic to the new model?
+3. **Shadow deployment** — how do you test a new model against production traffic without serving its output?
+
+**Acceptance criteria — you can explain:**
+- How would you implement canary routing in your gateway? (hint: weighted routing based on model version)
+- What metrics would you monitor during a canary rollout to decide whether to proceed or rollback?
+- How do you handle requests mid-stream during a rollover? (hint: connection draining)
+- What's the cost of running two model versions simultaneously? How does this affect fleet capacity?
+
+---
+
+### 5.5 — Multi-Accelerator Concepts (Conceptual)
+
+Research how large models are served across multiple GPUs and accelerator types.
+
+**Acceptance criteria — you can explain:**
+- **Tensor parallelism:** splitting a single layer across GPUs. When is this used? What's the communication overhead?
+- **Pipeline parallelism:** assigning different layers to different GPUs. How does micro-batching help with pipeline bubbles?
+- **Expert parallelism:** for Mixture-of-Experts models, routing experts to different GPUs
+- How would your gateway need to change if each "backend" is itself a multi-GPU deployment?
+- What does "hardware-agnostic" mean in practice? What's the abstraction layer between your gateway and GPU/TPU/Trainium?
+
+---
+
+### 5.6 — Full Stack Integration
+
+Wire everything into one system:
 
 ```
 Client → Rate Limiter → Priority Queue → Load Balancer (prefix-aware) → Backend Pool
-                                                                           ├── llama-1
-                                                                           ├── llama-2
-                                                                           └── llama-3
+                                                                           ├── llama-1 (1B model)
+                                                                           ├── llama-2 (1B model)
+                                                                           └── llama-3 (3B model)
 ```
 
-The entire stack runs with `docker compose --profile self-hosted up -d`.
-
-Write a load test script that:
-- Sends 50 requests over 30 seconds (adjust to your hardware)
-- Mix of priorities, prompt lengths, and max_tokens
+Write a load test:
+- 100 requests over 60 seconds
+- Mix of priorities, prompt lengths, max_tokens, and target models
 - 30% share a common system prompt
-- Reports: throughput, p50/p99 latency, cache hit rate, queue depths, per-backend request count
-
----
-
-### 5.4 — Metrics and Autoscaling Signal
-
-Your system should know when it needs more backends.
-
-- Expose a `/metrics` endpoint on the gateway that reports:
-  - Request queue depth
-  - In-flight requests per backend
-  - p99 latency over last 60 seconds
-  - Cache hit rate
-- Write a simple controller: if queue depth > 10 for 30 seconds, log "SCALE UP". If all backends have < 1 in-flight request for 60 seconds, log "SCALE DOWN".
-
-You don't need to actually spin up/down containers — just emit the signal. (But if you want to, `docker compose up --scale llama=5` is right there.)
-
----
-
-### 5.5 — Head-to-Head Benchmark
-
-Compare your self-hosted stack against the Docker Model Runner single-backend setup. Same prompts, same concurrency levels.
-
-Measure:
-- Tokens per second
-- Time to first token
-- p50 / p99 latency under load (1, 5, 10 concurrent requests)
-- Memory usage (`docker stats`)
+- Report: throughput, TTFT/TPOT, p50/p99 latency, cache hit rate, queue depths, per-backend request count
 
 **Acceptance criteria:**
-- Benchmark script outputs a comparison table
-- Results are reproducible (document exact model, quantization, and hardware)
-- You can answer: Does Docker Model Runner add overhead vs running llama-server directly? When does self-hosted with load balancing beat a single Model Runner instance?
+- Full system starts with `docker compose up -d`
+- Load test runs and produces a comprehensive report
+- You can identify the bottleneck in your system and explain how you'd address it at 10x scale
 
 ---
 
 ## How to Work Through This
 
-1. **Do exercises in order** — each one builds on the last
-2. **Write a benchmark/test for each exercise** — if you can't measure it, you didn't learn it
-3. **Write notes** — the "questions to answer" are the kind of thing you'd discuss in an interview
-4. **Don't over-engineer** — the first version should be ~50-100 lines. Improve from there
-5. **Compare strategies** — when you implement a new LB strategy, benchmark it against the old one
+1. **Parts 0–1 first** — understand what you're optimizing before building the optimizer
+2. **Measure everything** — every exercise should produce numbers. If you can't measure it, you don't understand it
+3. **Write notes on the conceptual sections** — they're interview material
+4. **The papers matter** — Orca and PagedAttention are foundational. Read them, don't just skim
+5. **Rust is the point** — the job lists Rust. Writing the gateway in Rust builds directly relevant experience
+6. **Don't skip the questions** — they're the kind of questions you'll get asked. Write actual answers, not mental notes
 
 Good luck. Start with 0.1.
