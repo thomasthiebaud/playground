@@ -11,32 +11,63 @@ Each section starts simple, then asks you to improve your own code.
 
 ## Prerequisites
 
-1. Docker and Docker Compose
-2. Buck2 (available via `./buck2` at the repo root)
+1. [Docker and Docker Compose](https://docs.docker.com/get-docker/)
+2. [Go](https://go.dev/dl/) (1.22+)
+3. Buck2 (available via `./buck2` at the repo root)
 
-That's it. Ollama runs in Docker — no local install needed.
+## Reference Docs
 
-## Getting Started
+Keep these open — you'll need them throughout:
 
-### 1. Start Ollama
+- [Ollama API docs](https://github.com/ollama/ollama/blob/main/docs/api.md)
+- [Docker Compose reference](https://docs.docker.com/reference/compose-file/)
+- [Dockerfile reference](https://docs.docker.com/reference/dockerfile/)
+- [Buck2 `genrule` docs](https://buck2.build/docs/prelude/globals/#genrule)
 
-```bash
-docker compose up -d
-```
+---
 
-This starts a single Ollama instance and pulls `qwen2:0.5b` (~300MB, runs on CPU).
+## Part 0: Setup
 
-### 2. Verify it works
+### 0.1 — Run Ollama in Docker
 
+Write a `docker-compose.yml` in this project directory that:
+- Runs the `ollama/ollama` image
+- Exposes port 11434 to your host
+- Uses a named volume so model data persists across restarts
+
+Start it with `docker compose up -d`.
+
+**Verify:** `curl http://localhost:11434/api/tags` should return a JSON response.
+
+---
+
+### 0.2 — Pull a Model
+
+You need a small model that runs on CPU. Use `qwen2:0.5b` (~300MB).
+
+Pull it into your running Ollama container using `docker compose exec`.
+
+**Verify:**
 ```bash
 curl http://localhost:11434/api/generate -d '{"model":"qwen2:0.5b","prompt":"Hi","stream":false}'
 ```
 
-### 3. Build & run your code
+Should return a JSON response with a `response` field.
 
+---
+
+### 0.3 — Buck2 Build Target
+
+Write a `BUCK` file in this project directory with a `genrule` that:
+- Takes your Go source files as inputs (use `glob`)
+- Runs `go build` to produce a binary
+- Marks the output as executable
+
+You'll need a `src/main.go` with a basic "hello world" HTTP server to test it.
+
+**Verify:**
 ```bash
-# From the repo root
-./buck2 build //projects/llm-inference-gateway/...
+./buck2 build //projects/llm-inference-gateway:gateway
 ./buck2 run //projects/llm-inference-gateway:gateway
 ```
 
@@ -93,13 +124,9 @@ Your server should:
 - Forward it to Ollama and stream the response back to the client
 - Log the timing info Ollama returns (`prompt_eval_duration`, `eval_duration`)
 
-**Build & run:**
-- Add a build target in `projects/llm-inference-gateway/BUCK` for your proxy
-- Build with `./buck2 build //projects/llm-inference-gateway:gateway`
-- Run with `./buck2 run //projects/llm-inference-gateway:gateway`
-- Ollama is already running via `docker compose up -d`
+Update your BUCK target to build this.
 
-**Goal:** Get a working baseline. Write a benchmark script that fires 10 concurrent requests and measures total time, per-request latency, and throughput (requests/sec).
+**Goal:** Get a working baseline. Write a benchmark script (or a second Buck2 target) that fires 10 concurrent requests and measures total time, per-request latency, and throughput (requests/sec).
 
 **Note:** Ollama serializes requests by default (one at a time). This is your baseline to improve against.
 
@@ -170,38 +197,15 @@ Questions:
 
 For this section, you'll scale up to **multiple Ollama instances** using Docker Compose.
 
-**Setup:** Update `docker-compose.yml` to run 3 Ollama instances:
+### 2.0 — Multi-Backend Docker Setup
 
-```yaml
-services:
-  ollama-1:
-    image: ollama/ollama:latest
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama1-data:/root/.ollama
+Update your `docker-compose.yml` to run 3 Ollama instances on different ports (11434, 11435, 11436). Each needs its own named volume.
 
-  ollama-2:
-    image: ollama/ollama:latest
-    ports:
-      - "11435:11434"
-    volumes:
-      - ollama2-data:/root/.ollama
+Pull the model on each instance using `docker compose exec`.
 
-  ollama-3:
-    image: ollama/ollama:latest
-    ports:
-      - "11436:11434"
-    volumes:
-      - ollama3-data:/root/.ollama
-```
+**Verify:** `curl http://localhost:11435/api/tags` and `curl http://localhost:11436/api/tags` both respond.
 
-Then `docker compose up -d` and pull the model on each instance:
-```bash
-docker compose exec ollama-1 ollama pull qwen2:0.5b
-docker compose exec ollama-2 ollama pull qwen2:0.5b
-docker compose exec ollama-3 ollama pull qwen2:0.5b
-```
+---
 
 ### 2.1 — Round Robin
 
@@ -327,34 +331,40 @@ Questions:
 
 ## Part 4: Putting It Together
 
-### 4.1 — Full Stack
+### 4.1 — Containerize the Gateway
+
+Write a `Dockerfile` for your Go gateway using a multi-stage build:
+- Build stage: compile the binary
+- Runtime stage: minimal image with just the binary
+
+Add the gateway service to your `docker-compose.yml` so it starts alongside the Ollama backends. The gateway should connect to Ollama instances via Docker's internal network (service names), not localhost.
+
+**Verify:** `docker compose up -d` starts everything. Requests to the gateway port get proxied to Ollama backends.
+
+---
+
+### 4.2 — Full Stack
 
 Wire everything together into a single system:
 
 ```
 Client → Rate Limiter → Priority Queue → Load Balancer (prefix-aware) → Backend Pool
-                                                                           ├── Ollama :11434
-                                                                           ├── Ollama :11435
-                                                                           └── Ollama :11436
+                                                                           ├── ollama-1
+                                                                           ├── ollama-2
+                                                                           └── ollama-3
 ```
 
-All backends are managed by `docker-compose.yml`. Your gateway is built with Buck2.
-
-**Containerize your gateway** — add a `Dockerfile` that builds the gateway binary and runs it. Add it to `docker-compose.yml` so the full stack starts with one command:
-
-```bash
-docker compose up -d
-```
+The entire stack runs with `docker compose up -d`.
 
 Write a load test script that:
-- Sends 50 requests over 30 seconds (real inference is slower — adjust to your hardware)
+- Sends 50 requests over 30 seconds (adjust to your hardware)
 - Mix of priorities, prompt lengths, and max_tokens
 - 30% share a common system prompt
 - Reports: throughput, p50/p99 latency, cache hit rate, queue depths, per-backend request count
 
 ---
 
-### 4.2 — Metrics and Autoscaling Signal
+### 4.3 — Metrics and Autoscaling Signal
 
 Your system should know when it needs more backends.
 
@@ -379,21 +389,4 @@ You don't need to actually spin up/down containers — just emit the signal. (Bu
 5. **Compare strategies** — when you implement a new LB strategy, benchmark it against the old one
 6. **Read Ollama's timing data** — the real numbers will teach you more than any blog post
 
-### Workflow
-
-```bash
-# Start backends
-docker compose up -d
-
-# Build & run your gateway
-./buck2 build //projects/llm-inference-gateway:gateway
-./buck2 run //projects/llm-inference-gateway:gateway
-
-# Run benchmarks
-./buck2 run //projects/llm-inference-gateway:bench
-
-# When you reach Part 4, everything runs in Docker
-docker compose up -d --build
-```
-
-Good luck. Start with 1.1.
+Good luck. Start with 0.1.
