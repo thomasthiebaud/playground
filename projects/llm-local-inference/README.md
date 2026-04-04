@@ -263,7 +263,44 @@ llama-server supports grammar-constrained generation via the `response_format` f
 
 ---
 
-### 1.6 — Containerize llama-server
+### 1.6 — Sampling Strategies
+
+The `temperature` parameter is just one way to control generation. llama-server supports the full set of sampling parameters from the OpenAI API.
+
+**Experiments:**
+1. Send the same prompt 10 times with `temperature: 0`. Then 10 times with `temperature: 1.0`. Compare output variance.
+2. Fix temperature at 1.0 and vary `top_p` (0.1, 0.5, 0.9, 1.0). How does it affect output diversity and quality?
+3. Fix temperature at 1.0 and vary `top_k` (1, 10, 50). Same comparison.
+4. Try `frequency_penalty: 1.0` and `presence_penalty: 1.0` — how do they change output for a prompt like "list 10 colors"?
+5. Combine constrained decoding (from 1.5) with different sampling parameters. Does temperature affect JSON validity?
+
+**Acceptance criteria:**
+- You understand what each parameter does to the logit distribution before sampling
+- You can explain: temperature scales logits, top-p truncates the distribution to a cumulative probability, top-k truncates to the K most likely tokens. What order are these applied in?
+- You can answer: why does `temperature: 0` make output deterministic? What does `top_p: 0.1` mean in practice? Why is `top_k` rarely used in production APIs?
+- You can answer: these are all features the inference team exposes through the API — where in the inference pipeline do they execute? (hint: after the model forward pass, before token selection)
+
+---
+
+### 1.7 — Model Loading and Cold Start
+
+How long does it take for llama-server to start serving after launch? This is operationally critical — it affects autoscaling, deployment, and failover.
+
+**Experiments:**
+1. Time how long `llama-server` takes from process start to first successful response. Measure for both the 1B and 3B models.
+2. Send a request immediately after starting llama-server. What happens? Does it queue, reject, or crash?
+3. Kill a llama-server and restart it. How long before it can serve again?
+4. Start llama-server with `--warmup` (if supported) or send a dummy request at startup. Does it change first-request latency?
+
+**Acceptance criteria:**
+- You've measured cold start time for each model size
+- You can answer: why does loading a larger model take longer? (hint: reading weights from disk into memory)
+- You can answer: how does cold start time affect autoscaling decisions? If scaling up takes 30 seconds, what's the minimum lead time your autoscaler needs?
+- You can answer: how would you pre-warm a new backend before adding it to the load balancer pool?
+
+---
+
+### 1.8 — Containerize llama-server
 
 Write a Dockerfile that builds llama.cpp from source. Model files should be mounted at runtime, not baked in.
 
@@ -382,6 +419,43 @@ This is the Netflix pattern from the paper you read in 2.2.
 
 ---
 
+### 2.8 — Request Tracing
+
+In production, you need to trace a request from client → gateway → backend → response. Add distributed tracing to your gateway.
+
+- Generate a unique request ID for each incoming request (or use the client-provided `X-Request-ID` header)
+- Propagate it to the backend via headers
+- Include it in every log line (queue entry, backend selection, response start, response complete)
+- Return it in the response headers
+
+**Acceptance criteria:**
+- You can grep logs for a single request ID and see its full lifecycle: arrival → queue wait → backend selection → first token → completion → total latency
+- Under concurrent load, logs from different requests don't interleave ambiguously
+- You can answer: why is request-level tracing essential for debugging tail latency issues in production?
+
+---
+
+### 2.9 — Error Handling and Timeouts
+
+Backends fail. Requests hang. Handle it gracefully.
+
+- Add a configurable timeout for backend requests (e.g., 30s). If the backend doesn't respond, return 504 to the client.
+- If the backend returns a non-2xx status, forward the error to the client with your own error envelope (don't leak raw backend errors).
+- If the backend disconnects mid-stream, close the client connection cleanly.
+- Log all error events with the request ID from 2.8.
+
+**Test:**
+1. Start a request to llama-server, then kill llama-server mid-response. Does your gateway handle it cleanly?
+2. Send a request with `max_tokens: 100000` (exceeds context). What does the backend return? What does your gateway return?
+3. Set your timeout to 1 second and send a long prompt. Does the 504 fire correctly?
+
+**Acceptance criteria:**
+- No panics or connection leaks under any failure scenario
+- Every error response includes the request ID and a useful error message
+- You can answer: what's the right timeout for an inference request? (hint: it depends on max_tokens and decode speed — a 4000-token response at 30 tok/sec takes ~130s)
+
+---
+
 ## Part 3: Multi-Backend Routing
 
 Scale to multiple inference servers and route intelligently.
@@ -456,7 +530,7 @@ Run one llama-server instance with the 1B model, another with the 3B model. Add 
 
 ---
 
-## Part 4: Deep Dive — Batching and PagedAttention
+## Part 4: Deep Dive — Inference Optimizations
 
 This is the most important section for understanding modern inference systems.
 
@@ -492,7 +566,26 @@ Read the [PagedAttention paper](https://arxiv.org/abs/2309.06180) — focus on s
 
 ---
 
-### 4.3 — Run vLLM (Optional — requires GPU)
+### 4.3 — FlashAttention
+
+> **Format:** Paper study
+
+Standard attention is quadratic in sequence length — O(n²) memory and compute. FlashAttention reformulates it to avoid materializing the full attention matrix, making it IO-aware.
+
+1. Read [FlashAttention: Fast and Memory-Efficient Exact Attention](https://arxiv.org/abs/2205.14135) (sections 1–3). Focus on: why does standard attention waste GPU memory bandwidth? How does tiling fix this?
+2. Read the follow-up [FlashAttention-2](https://arxiv.org/abs/2307.08691) (section 1–2). What changed?
+3. Check whether your llama.cpp build uses FlashAttention: look for `--flash-attn` / `-fa` in `llama-server --help`. If available, benchmark with and without it.
+
+**Acceptance criteria — you can explain:**
+- Why is standard attention memory-inefficient? (hint: it materializes an N×N attention matrix)
+- How does FlashAttention avoid this using tiling and recomputation?
+- What is the difference between being "compute-bound" vs "IO-bound"? Which is standard attention during prefill?
+- Why does FlashAttention help more with longer sequences?
+- Every modern inference stack (vLLM, TensorRT-LLM, llama.cpp) uses FlashAttention or a variant. Why is it considered table-stakes?
+
+---
+
+### 4.4 — Run vLLM (Optional — requires GPU)
 
 > **Format:** Hands-on (if you have a CUDA GPU), otherwise skip
 
@@ -511,7 +604,7 @@ vLLM exposes the same OpenAI-compatible API. Point your bench tool at it.
 
 ---
 
-### 4.4 — Speculative Decoding
+### 4.5 — Speculative Decoding
 
 > **Format:** Research + local experiment
 
@@ -681,3 +774,43 @@ Every exercise produces either working code or written answers. Nothing is "just
 6. **Run the experiments** — the local experiments in Parts 4–5 exist because observing a concept beats reading about it
 
 Good luck. Start with 0.1.
+
+---
+
+## Next Steps
+
+After completing this project, here's where to go deeper.
+
+### Read Source Code
+
+The best way to understand production inference systems is to read them:
+
+- **[vLLM](https://github.com/vllm-project/vllm)** — start with `vllm/engine/async_llm_engine.py` (request scheduling) and `vllm/core/scheduler.py` (the scheduler that implements continuous batching with PagedAttention). This is the most widely deployed open-source inference engine.
+- **[llama.cpp server](https://github.com/ggerganov/llama.cpp/blob/master/examples/server/server.cpp)** — you built and used this. Now read how it handles slots, batching, and the request lifecycle.
+- **[TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM)** — Nvidia's inference stack. Heavier but shows how inference is optimized for specific hardware.
+- **[SGLang](https://github.com/sgl-project/sglang)** — fast inference engine with RadixAttention (a tree-based prefix caching scheme). Interesting alternative to vLLM's approach.
+
+### Papers
+
+Foundational papers you should know for an inference role interview:
+
+| Paper | Why it matters |
+|-------|---------------|
+| [Attention Is All You Need](https://arxiv.org/abs/1706.03762) | The transformer architecture — the thing you're serving |
+| [FlashAttention](https://arxiv.org/abs/2205.14135) | IO-aware attention — you read this in 4.3 |
+| [PagedAttention / vLLM](https://arxiv.org/abs/2309.06180) | KV cache memory management — you read this in 4.2 |
+| [Orca](https://www.usenix.org/conference/osdi22/presentation/yu) | Continuous batching — you read this in 1.3 |
+| [Speculative Decoding](https://arxiv.org/abs/2211.17192) | Draft-verify for faster decoding — you read this in 4.5 |
+| [FlashDecoding](https://pytorch.org/blog/flash-decoding/) | Parallelizing attention across the KV cache during decode — complements FlashAttention |
+| [Efficiently Scaling Transformer Inference](https://arxiv.org/abs/2211.05102) | Multi-device partitioning strategies — you studied this in 5.5 |
+| [DistServe](https://arxiv.org/abs/2401.09670) | Disaggregating prefill and decode to different machines — a production technique at scale |
+| [Sarathi-Serve](https://arxiv.org/abs/2403.02310) | Chunked prefills to prevent decode stalls — important for tail latency |
+
+### Topics to Explore
+
+- **Prefill-decode disaggregation** — DistServe and Splitwise show how to run prefill and decode on separate hardware. This is directly relevant to fleet orchestration at Anthropic's scale.
+- **Mixture of Experts inference** — MoE models (like Mixtral) only activate a subset of parameters per token. This changes routing, memory, and parallelism strategies.
+- **KV cache compression** — beyond quantization: techniques like [Scissorhands](https://arxiv.org/abs/2305.17118) and [H2O](https://arxiv.org/abs/2306.14048) that evict unimportant KV cache entries.
+- **Kernel optimization** — writing CUDA kernels for custom attention, fused operations. Read [Triton](https://triton-lang.org/) tutorials to understand how FlashAttention-style kernels are written.
+- **Model compilation** — `torch.compile`, XLA, and how they reduce inference latency by fusing operations.
+- **Kubernetes operators for ML** — [KServe](https://kserve.github.io/website/), [Ray Serve](https://docs.ray.io/en/latest/serve/index.html) — how inference is orchestrated in production Kubernetes clusters.
