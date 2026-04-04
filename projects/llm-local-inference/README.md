@@ -36,53 +36,100 @@ Papers and blog posts are linked inline in the exercises that use them.
 
 ## Part 0: How LLM Inference Works
 
-Before writing any infrastructure code, understand what you're optimizing for.
+Before writing any infrastructure code, understand what you're optimizing for. This part bridges "I've called the API" to "I know what happens between my request and the response."
 
-### 0.1 — Transformer Inference Phases
+### 0.1 — Pull a Model and Poke the API
 
-Read and understand the two distinct phases of autoregressive LLM inference:
-
-1. **Prefill** (prompt processing): all input tokens are processed in parallel to build the KV cache
-2. **Decode** (token generation): tokens are generated one at a time, each attending to the full KV cache
-
-**Start here:**
-1. Read [The Illustrated Transformer](https://jalammar.github.io/illustrated-transformer/). Then explain in your own words how self-attention works and why its cost is quadratic in sequence length.
-2. Read [Transformer Inference Arithmetic](https://kipp.ly/transformer-inference-arithmetic/). Then calculate, for a 1B parameter model on your hardware: what's the theoretical max tokens/sec during decode? (hint: it's `memory_bandwidth / (model_size_bytes)` — verify this against your actual benchmark numbers from 0.3)
-3. Read the Databricks post [LLM Inference Performance Engineering](https://www.databricks.com/blog/llm-inference-performance-engineering-best-practices). Then answer: for your 1B model, is prefill or decode the bottleneck at a 500-token prompt with 100-token completion? What about a 50-token prompt with 500-token completion?
-
-**Acceptance criteria — you can answer:**
-- Why is prefill compute-bound and decode memory-bandwidth-bound?
-- What is the KV cache? How does its memory grow with sequence length and batch size?
-- What determines tokens-per-second during decode? (hint: it's not FLOPs)
-- Why does a longer context window cost more memory but not proportionally more compute during decode?
-- What is the difference between `prompt_tokens` and `completion_tokens` in terms of computational cost?
-
----
-
-### 0.2 — Quantization
-
-Pull two versions of the same model:
+Get a model running locally and explore what the API gives you.
 
 ```bash
-docker model pull ai/llama3.2:1B-Q4_K_M
 docker model pull ai/llama3.2:1B-Q8_0
 ```
 
-Send the same prompts to both. Compare output quality, speed, and memory usage.
+Send a non-streaming request and study the response:
+
+```bash
+curl http://localhost:12434/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "ai/llama3.2:1B-Q8_0",
+    "messages": [{"role": "user", "content": "What is 2+2?"}],
+    "stream": false
+  }'
+```
+
+Now send a streaming request (`"stream": true`, use `curl -N`) and watch the chunks arrive.
+
+**Acceptance criteria:**
+- `docker model list` shows the model
+- You can explain what each field in the response means: `choices`, `usage.prompt_tokens`, `usage.completion_tokens`, `finish_reason`
+- You've observed the difference between streaming and non-streaming — streaming returns chunks with `delta.content`, non-streaming returns the full `message.content`
+- You can answer: why does the streaming response come in many small pieces instead of one big response? What determines the size of each piece?
+
+---
+
+### 0.2 — What Happens Inside: Tokens, Embeddings, Attention
+
+You've used the API. Now understand what the model does with your request.
+
+1. Read [The Illustrated Transformer](https://jalammar.github.io/illustrated-transformer/). Focus on: embedding, self-attention, the full encoder-decoder diagram. Then answer in your own words: what does self-attention compute and why is its cost quadratic in sequence length?
+2. Read [What Is a Token?](https://platform.openai.com/tokenizer) — use OpenAI's tokenizer UI. Paste a few sentences and observe how text is split into tokens. Then answer: why is "tokenization" a separate step from the model? Why not feed raw characters?
+3. Read [The Illustrated GPT-2](https://jalammar.github.io/illustrated-gpt2/). This is the decoder-only architecture that modern LLMs (including Llama) use. Focus on: how tokens are generated one at a time (autoregressive), and how the model attends to all previous tokens when producing the next one.
+
+**Acceptance criteria — you can explain:**
+- What is a token? Why do models work with tokens instead of words or characters?
+- What is an embedding? What is positional encoding and why is it needed?
+- What does self-attention do? Why is it the core operation?
+- What does "autoregressive" mean? Why does the model produce one token at a time?
+- What are "logits" and how does the model pick the next token? (hint: softmax → probability distribution → sampling)
+
+---
+
+### 0.3 — Prefill and Decode: The Two Phases
+
+Now understand what makes inference expensive — and what you'll spend the rest of this project optimizing.
+
+When you send "Explain Docker in one sentence" to the API, two very different things happen:
+
+1. **Prefill** — the model processes your entire prompt at once (in parallel) and builds an internal data structure called the KV cache
+2. **Decode** — the model generates tokens one at a time, reading from the KV cache on each step
+
+These two phases have completely different performance characteristics.
+
+1. Read [Transformer Inference Arithmetic](https://kipp.ly/transformer-inference-arithmetic/). This is the most important read in the entire project. Then calculate: for a 1B parameter model in FP16 (2GB), on your hardware's memory bandwidth, what's the theoretical max tokens/sec during decode? (formula: `memory_bandwidth_bytes_per_sec / model_size_bytes`)
+2. Read the Databricks post [LLM Inference Performance Engineering](https://www.databricks.com/blog/llm-inference-performance-engineering-best-practices). Focus on the prefill vs decode analysis. Then answer: for your 1B model, is prefill or decode the bottleneck with a 500-token prompt and 100-token completion? What about 50-token prompt and 500-token completion?
+
+**Acceptance criteria — you can answer:**
+- Why is prefill compute-bound and decode memory-bandwidth-bound?
+- What is the KV cache? Why is it needed? How does its memory grow with sequence length?
+- What determines tokens/sec during decode? (hint: it's not FLOPs — it's how fast you can read model weights from memory)
+- Why does a longer context window cost more memory but not proportionally more compute during decode?
+- What's the difference between `prompt_tokens` and `completion_tokens` in cost? (hint: prompt tokens are processed in parallel during prefill; completion tokens are generated one by one)
+
+---
+
+### 0.4 — Quantization
+
+You've been running `Q8_0`. Now pull a smaller quantization and compare.
+
+```bash
+docker model pull ai/llama3.2:1B-Q4_K_M
+```
 
 1. Read the [GGUF format spec](https://github.com/ggerganov/ggml/blob/master/docs/gguf.md) — find the section on quantization types. What's the difference between Q4_0 and Q4_K_M? What does the "K" mean?
-2. Read [Introduction to Quantization](https://mlabonne.github.io/blog/posts/Introduction_to_Weight_Quantization.html). Then calculate: a 1B model in FP16 is ~2GB. How large should Q8_0 and Q4_K_M be? Verify against the actual file sizes Docker pulled.
-3. Send the same 10 prompts to both Q4_K_M and Q8_0 using your bench tool. Record tokens/sec, and eyeball output quality differences.
+2. Read [Introduction to Quantization](https://mlabonne.github.io/blog/posts/Introduction_to_Weight_Quantization.html). Then calculate: a 1B model in FP16 is ~2GB. How large should Q8_0 and Q4_K_M be? Verify against the actual sizes Docker pulled.
+3. Send the same 10 prompts to both Q4_K_M and Q8_0. Record tokens/sec and eyeball output quality differences.
 
 **Acceptance criteria:**
 - You can explain what quantization does (reduce weight precision from FP16 → INT8/INT4)
 - You've measured tokens/sec and model size for Q4_K_M vs Q8_0 on the same hardware
 - You can articulate the quality/speed/memory trade-off
 - You can answer: when would you choose Q4 over Q8? When would neither be acceptable?
+- Revisit your arithmetic from 0.3: does the theoretical decode speed change with quantization? (hint: smaller model = fewer bytes to read per token)
 
 ---
 
-### 0.3 — Benchmarking Fundamentals
+### 0.5 — Benchmarking Fundamentals
 
 Before building anything, establish your measurement toolkit. Write a Rust CLI tool that:
 - Sends requests to a configurable OpenAI-compatible endpoint
@@ -95,8 +142,8 @@ Create a Buck2 target for this tool. You'll reuse it throughout every exercise.
 **Acceptance criteria:**
 - `./buck2 run //projects/llm-local-inference:bench -- --url http://localhost:12434 --concurrency 10` works
 - Outputs a clean table with TTFT, TPOT, throughput, and latency percentiles
-- You understand why TTFT and TPOT are the two metrics that matter most for user experience
-- You can answer: why does TTFT increase with prompt length? Why does TPOT stay roughly constant regardless of prompt length?
+- Run it against both Q4_K_M and Q8_0 — verify the numbers match your theoretical predictions from 0.3
+- You can answer: why does TTFT increase with prompt length? Why does TPOT stay roughly constant regardless of prompt length? (hint: TTFT ≈ prefill time, TPOT ≈ single decode step)
 
 ### OpenAI Chat Completions Cheat Sheet
 
@@ -147,7 +194,7 @@ Download the same model you used with Model Runner (Llama 3.2 1B, Q8_0 quantizat
 **Acceptance criteria:**
 - `llama-server` running on port 8081
 - Same curl commands work against both Model Runner (:12434) and your server (:8081)
-- Run your bench tool from 0.3 against both — compare numbers
+- Run your bench tool from 0.5 against both — compare numbers
 
 ---
 
@@ -245,7 +292,7 @@ Create a Buck2 target for the gateway. Look into `tokio`, `hyper` or `axum`, and
 **Acceptance criteria:**
 - `./buck2 run //projects/llm-local-inference:gateway` starts the server
 - Streaming and non-streaming requests both work through your proxy
-- Your bench tool from 0.3 works against the proxy
+- Your bench tool from 0.5 works against the proxy
 - Proxy adds < 5ms overhead vs hitting Model Runner directly
 
 ---
