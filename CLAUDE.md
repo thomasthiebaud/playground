@@ -27,3 +27,13 @@ Each experiment lives in `projects/<name>/` and is fully self-contained:
 Projects may depend on shared code in `libs/` but never on each other. Buck2 builds, Docker runs.
 
 When adding a new project, update the root `README.md` with a short description and link to the project folder. The root README serves as the portfolio landing page.
+
+## Learning-First Policy
+
+This repo is a **learning package**. The goal is to build understanding, not to ship code fast.
+
+- **Never provide solutions, implementations, or working code.** Only provide problem statements, requirements, and verification steps.
+- **Exercises must include clear acceptance criteria** — how the user knows they got it right (e.g., "verify with `curl ...`", "benchmark should show X").
+- **Exercises may reference docs** (link to official docs, name the relevant concept) but must not include code snippets that solve the problem.
+- **Code reuse follows exercise order:** an exercise may only depend on code the user wrote in previous exercises within the same project, or on shared code in `libs/`. Never depend on exercises from other projects.
+- **When the user asks for help on an exercise:** give hints and point to relevant docs or concepts. Do not write the code for them. Ask leading questions instead.
