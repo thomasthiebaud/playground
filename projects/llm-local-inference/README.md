@@ -376,9 +376,13 @@ Run one llama-server instance with the 1B model, another with the 3B model. Add 
 
 This is the most important section for understanding modern inference systems.
 
-### 4.1 — Study: Static vs Continuous Batching
+### 4.1 — Static vs Continuous Batching
+
+> **Format:** Paper study + local experiment
 
 Read the [Orca paper](https://www.usenix.org/conference/osdi22/presentation/yu) and understand why iteration-level scheduling matters.
+
+**Local experiment:** You can observe continuous batching in llama-server directly. Run it with `-np 4` (4 slots) and fire 4 requests simultaneously with very different `max_tokens` (10, 50, 100, 200). Log when each response completes. Then compare with `-np 1` — the 4 requests now serialize. The difference in total wall-clock time is the benefit of continuous batching.
 
 **Acceptance criteria — you can explain:**
 - In static batching, why does the shortest request in a batch waste compute while waiting for the longest?
@@ -388,9 +392,13 @@ Read the [Orca paper](https://www.usenix.org/conference/osdi22/presentation/yu) 
 
 ---
 
-### 4.2 — Study: PagedAttention and vLLM
+### 4.2 — PagedAttention and vLLM
+
+> **Format:** Paper study + local experiment
 
 Read the [PagedAttention paper](https://arxiv.org/abs/2309.06180) and explore [vLLM](https://docs.vllm.ai/).
+
+**Local experiment:** You can observe KV cache memory pressure in llama-server. Run with a small context (`-c 512 -np 4` = 128 tokens per slot). Send requests with increasing prompt lengths and watch what happens when a prompt exceeds the per-slot context. Then run with `-c 4096 -np 4` and observe memory usage (`docker stats` or process RSS). The difference illustrates why KV cache memory management matters — and why PagedAttention's approach of allocating on-demand instead of pre-allocating is so impactful.
 
 **Acceptance criteria — you can explain:**
 - What problem does PagedAttention solve? (hint: KV cache memory fragmentation)
@@ -400,7 +408,9 @@ Read the [PagedAttention paper](https://arxiv.org/abs/2309.06180) and explore [v
 
 ---
 
-### 4.3 — Run vLLM (Optional, GPU required)
+### 4.3 — Run vLLM (Optional — requires GPU)
+
+> **Format:** Hands-on (if you have a CUDA GPU), otherwise skip
 
 If you have a GPU, install and run vLLM:
 
@@ -418,9 +428,15 @@ vLLM exposes the same OpenAI-compatible API. Point your benchmark script at it.
 
 ---
 
-### 4.4 — Speculative Decoding (Conceptual)
+### 4.4 — Speculative Decoding
+
+> **Format:** Research + local experiment
 
 Research speculative decoding — a technique for faster inference without quality loss.
+
+**Local experiment:** llama-server supports speculative decoding via the `--draft` flag. Download a smaller model (e.g., Llama 3.2 1B as draft for a 3B target). Run `llama-server -m <3B-model> --draft <1B-model> -nd <num-draft-tokens>` and benchmark against the 3B model alone. Measure tokens/sec and observe the acceptance rate in the logs.
+
+If you only have the 1B model, you can still experiment: llama.cpp also supports self-speculative decoding (`--draft-self`) where the model drafts for itself using fewer layers. Try it and measure the impact.
 
 **Acceptance criteria — you can explain:**
 - How does speculative decoding use a smaller "draft" model to speed up a larger "target" model?
@@ -481,7 +497,9 @@ Implement a simple autoscaler controller:
 
 ---
 
-### 5.4 — Deployment Strategies (Conceptual)
+### 5.4 — Deployment Strategies
+
+> **Format:** Research + local simulation
 
 You're deploying a new model version to a fleet serving production traffic. Research and design strategies for:
 
@@ -489,17 +507,28 @@ You're deploying a new model version to a fleet serving production traffic. Rese
 2. **Canary deployment** — how do you gradually shift traffic to the new model?
 3. **Shadow deployment** — how do you test a new model against production traffic without serving its output?
 
+**Local simulation:** You already have multi-model routing from 3.6. Simulate a canary deployment locally:
+- Run two llama-server instances: one with Q8_0 ("v1"), one with Q4_K_M ("v2" — pretend it's a new model version)
+- Add weighted routing to your gateway: 90% to v1, 10% to v2 (configurable via env var or API)
+- Run your load test. Gradually shift weight: 90/10 → 70/30 → 50/50 → 0/100
+- Log per-backend latency and token counts at each stage
+- Implement a rollback trigger: if v2's p99 latency exceeds v1's by more than 50%, automatically shift all traffic back to v1
+
 **Acceptance criteria — you can explain:**
-- How would you implement canary routing in your gateway? (hint: weighted routing based on model version)
+- How would you implement canary routing in your gateway? (you built it)
 - What metrics would you monitor during a canary rollout to decide whether to proceed or rollback?
 - How do you handle requests mid-stream during a rollover? (hint: connection draining)
 - What's the cost of running two model versions simultaneously? How does this affect fleet capacity?
 
 ---
 
-### 5.5 — Multi-Accelerator Concepts (Conceptual)
+### 5.5 — Multi-Accelerator Concepts
+
+> **Format:** Research + local simulation
 
 Research how large models are served across multiple GPUs and accelerator types.
+
+**Local simulation:** You can't run multi-GPU tensor parallelism locally (without multiple GPUs), but you can simulate **pipeline parallelism** at the gateway level. llama-server's `-ngl` flag controls how many layers are offloaded to GPU (or in CPU-only mode, you can think of it as a layer split). Run two llama-server instances and imagine they each hold half the model layers — your gateway would need to chain them (request → instance 1 → instance 2 → response). Build a simple pipeline proxy that forwards through two backends sequentially and measure the latency overhead vs a single backend. This is a toy version of pipeline parallelism's communication cost.
 
 **Acceptance criteria — you can explain:**
 - **Tensor parallelism:** splitting a single layer across GPUs. When is this used? What's the communication overhead?
@@ -534,13 +563,24 @@ Write a load test:
 
 ---
 
+## Exercise Format Legend
+
+Exercises are labeled by format:
+
+- **Hands-on** (no label) — write code, build something, run it locally
+- **Paper study + local experiment** — read a paper, then run a local experiment that demonstrates the concept
+- **Research + local experiment** — study a topic you can't fully replicate locally, then run a simplified local experiment to build intuition
+- **Research + local simulation** — study a topic, then simulate it by repurposing your existing local infrastructure
+
+Every exercise produces either working code or written answers. Nothing is "just reading."
+
 ## How to Work Through This
 
 1. **Parts 0–1 first** — understand what you're optimizing before building the optimizer
 2. **Measure everything** — every exercise should produce numbers. If you can't measure it, you don't understand it
-3. **Write notes on the conceptual sections** — they're interview material
+3. **Write actual answers to the questions** — in a doc, not in your head. They're interview prep
 4. **The papers matter** — Orca and PagedAttention are foundational. Read them, don't just skim
 5. **Rust is the point** — the job lists Rust. Writing the gateway in Rust builds directly relevant experience
-6. **Don't skip the questions** — they're the kind of questions you'll get asked. Write actual answers, not mental notes
+6. **Run the experiments** — the local experiments in Parts 4–5 exist because observing a concept beats reading about it
 
 Good luck. Start with 0.1.
