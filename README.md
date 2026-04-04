@@ -8,6 +8,12 @@ A monorepo for hands-on systems engineering experiments. Each project is self-co
 |---------|-------------|
 | [llm-inference-gateway](projects/llm-inference-gateway/) | LLM inference optimization, load balancing, and traffic management using Ollama |
 
+## Future Work
+
+| Item | Notes |
+|------|-------|
+| Buck2 Go toolchain | Set up `go_binary`/`go_library` rules so projects can use native Go targets instead of `genrule` shelling out to `go build` |
+
 ## Setup
 
 This project uses [DotSlash](https://dotslash-cli.com) to manage **Buck2**. This ensures everyone uses the exact same version without manual installation or compilation errors.
