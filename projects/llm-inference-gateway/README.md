@@ -3,7 +3,7 @@
 A structured set of exercises to build intuition for LLM serving infrastructure.
 Each section starts simple, then asks you to improve your own code.
 
-**Language:** Python or Go (your choice per exercise).
+**Language:** Go.
 
 **Backend:** [Ollama](https://ollama.com/) running a small model, managed via Docker Compose.
 

@@ -1,22 +1,20 @@
 # Add your build targets here as you work through the exercises.
 #
-# Example for a Python gateway:
-#
-#   python_binary(
-#       name = "gateway",
-#       main = "src/gateway.py",
-#   )
-#
-# Example for a Go gateway (requires Go toolchain setup):
-#
-#   go_binary(
-#       name = "gateway",
-#       srcs = ["src/main.go"],
-#   )
-#
-# Example benchmark target:
-#
-#   python_binary(
-#       name = "bench",
-#       main = "src/bench.py",
-#   )
+# Buck2 doesn't have built-in Go rules in the demo toolchain.
+# For now, use genrule to shell out to the Go compiler:
+
+genrule(
+    name = "gateway",
+    srcs = glob(["src/**/*.go"]),
+    out = "gateway",
+    cmd = "cd $SRCS_DIR/.. && go build -o $OUT ./src/",
+    executable = True,
+)
+
+genrule(
+    name = "bench",
+    srcs = glob(["src/**/*.go"]),
+    out = "bench",
+    cmd = "cd $SRCS_DIR/.. && go build -o $OUT ./src/bench/",
+    executable = True,
+)
