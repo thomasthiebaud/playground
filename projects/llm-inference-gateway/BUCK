@@ -1,0 +1,22 @@
+# Add your build targets here as you work through the exercises.
+#
+# Example for a Python gateway:
+#
+#   python_binary(
+#       name = "gateway",
+#       main = "src/gateway.py",
+#   )
+#
+# Example for a Go gateway (requires Go toolchain setup):
+#
+#   go_binary(
+#       name = "gateway",
+#       srcs = ["src/main.go"],
+#   )
+#
+# Example benchmark target:
+#
+#   python_binary(
+#       name = "bench",
+#       main = "src/bench.py",
+#   )

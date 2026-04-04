@@ -1,19 +1,44 @@
-# LLM Inference Systems — Practice Exercises
+# LLM Inference Gateway — Practice Exercises
 
 A structured set of exercises to build intuition for LLM serving infrastructure.
 Each section starts simple, then asks you to improve your own code.
 
 **Language:** Python or Go (your choice per exercise).
 
-**Backend:** [Ollama](https://ollama.com/) running a small model.
+**Backend:** [Ollama](https://ollama.com/) running a small model, managed via Docker Compose.
+
+**Build:** [Buck2](https://buck2.build/) for building your proxy/gateway code.
 
 ## Prerequisites
 
-1. Install Ollama: `curl -fsSL https://ollama.com/install.sh | sh`
-2. Pull a small model: `ollama pull qwen2:0.5b` (300MB, runs on CPU)
-3. Verify it works: `curl http://localhost:11434/api/generate -d '{"model":"qwen2:0.5b","prompt":"Hi","stream":false}'`
+1. Docker and Docker Compose
+2. Buck2 (available via `./buck2` at the repo root)
 
-Ollama exposes a local HTTP API on port 11434. You'll build **infrastructure in front of it**.
+That's it. Ollama runs in Docker — no local install needed.
+
+## Getting Started
+
+### 1. Start Ollama
+
+```bash
+docker compose up -d
+```
+
+This starts a single Ollama instance and pulls `qwen2:0.5b` (~300MB, runs on CPU).
+
+### 2. Verify it works
+
+```bash
+curl http://localhost:11434/api/generate -d '{"model":"qwen2:0.5b","prompt":"Hi","stream":false}'
+```
+
+### 3. Build & run your code
+
+```bash
+# From the repo root
+./buck2 build //projects/llm-inference-gateway/...
+./buck2 run //projects/llm-inference-gateway:gateway
+```
 
 ### Ollama API Cheat Sheet
 
@@ -68,6 +93,12 @@ Your server should:
 - Forward it to Ollama and stream the response back to the client
 - Log the timing info Ollama returns (`prompt_eval_duration`, `eval_duration`)
 
+**Build & run:**
+- Add a build target in `projects/llm-inference-gateway/BUCK` for your proxy
+- Build with `./buck2 build //projects/llm-inference-gateway:gateway`
+- Run with `./buck2 run //projects/llm-inference-gateway:gateway`
+- Ollama is already running via `docker compose up -d`
+
 **Goal:** Get a working baseline. Write a benchmark script that fires 10 concurrent requests and measures total time, per-request latency, and throughput (requests/sec).
 
 **Note:** Ollama serializes requests by default (one at a time). This is your baseline to improve against.
@@ -85,7 +116,7 @@ You'll build a **queue in front of Ollama** that controls admission.
 - Track and log: queue depth, wait time (time in queue before forwarding), total latency
 
 **Experiment:**
-- Set `OLLAMA_NUM_PARALLEL=2` (env var, restart Ollama) to allow 2 concurrent requests
+- Edit `docker-compose.yml` to set `OLLAMA_NUM_PARALLEL=2` on the Ollama service, then `docker compose up -d` to apply
 - Set your worker count to 2 to match
 - Benchmark again: compare throughput vs your 1.1 baseline
 
@@ -137,17 +168,40 @@ Questions:
 
 ## Part 2: Load Balancing
 
-For this section, run **multiple Ollama instances** on different ports.
+For this section, you'll scale up to **multiple Ollama instances** using Docker Compose.
 
-**Setup:** You can run multiple Ollama instances like this:
-```bash
-OLLAMA_HOST=0.0.0.0:11434 ollama serve  # instance 1
-OLLAMA_HOST=0.0.0.0:11435 ollama serve  # instance 2
-OLLAMA_HOST=0.0.0.0:11436 ollama serve  # instance 3
+**Setup:** Update `docker-compose.yml` to run 3 Ollama instances:
+
+```yaml
+services:
+  ollama-1:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama1-data:/root/.ollama
+
+  ollama-2:
+    image: ollama/ollama:latest
+    ports:
+      - "11435:11434"
+    volumes:
+      - ollama2-data:/root/.ollama
+
+  ollama-3:
+    image: ollama/ollama:latest
+    ports:
+      - "11436:11434"
+    volumes:
+      - ollama3-data:/root/.ollama
 ```
-(Each needs its own `OLLAMA_MODELS` dir if you want isolated model storage.)
 
-Alternatively, if you only have resources for one Ollama instance, you can simulate multiple backends by running your proxy from Part 1 on multiple ports, all pointing to the same Ollama. You'll still learn the LB patterns.
+Then `docker compose up -d` and pull the model on each instance:
+```bash
+docker compose exec ollama-1 ollama pull qwen2:0.5b
+docker compose exec ollama-2 ollama pull qwen2:0.5b
+docker compose exec ollama-3 ollama pull qwen2:0.5b
+```
 
 ### 2.1 — Round Robin
 
@@ -185,7 +239,7 @@ Backends crash. Handle it.
 - If it later passes a health check, re-add it
 - While a backend is marked unhealthy, don't route to it
 
-**Test:** start 3 backends, kill one (`kill` the Ollama process), observe routing around it. Restart it, observe it rejoining.
+**Test:** `docker compose stop ollama-2`, observe routing around it. `docker compose start ollama-2`, observe it rejoining.
 
 ---
 
@@ -284,6 +338,14 @@ Client → Rate Limiter → Priority Queue → Load Balancer (prefix-aware) → 
                                                                            └── Ollama :11436
 ```
 
+All backends are managed by `docker-compose.yml`. Your gateway is built with Buck2.
+
+**Containerize your gateway** — add a `Dockerfile` that builds the gateway binary and runs it. Add it to `docker-compose.yml` so the full stack starts with one command:
+
+```bash
+docker compose up -d
+```
+
 Write a load test script that:
 - Sends 50 requests over 30 seconds (real inference is slower — adjust to your hardware)
 - Mix of priorities, prompt lengths, and max_tokens
@@ -304,7 +366,7 @@ Your system should know when it needs more backends.
   - Per-backend `prompt_eval_duration` average (indicates KV cache effectiveness)
 - Write a simple controller: if queue depth > 10 for 30 seconds, log "SCALE UP". If all backends have < 1 in-flight request for 60 seconds, log "SCALE DOWN".
 
-You don't need to actually spin up/down servers — just emit the signal.
+You don't need to actually spin up/down containers — just emit the signal. (But if you want to, `docker compose up --scale ollama=5` is right there.)
 
 ---
 
@@ -316,5 +378,22 @@ You don't need to actually spin up/down servers — just emit the signal.
 4. **Don't over-engineer** — the first version should be ~50-100 lines. Improve from there
 5. **Compare strategies** — when you implement a new LB strategy, benchmark it against the old one
 6. **Read Ollama's timing data** — the real numbers will teach you more than any blog post
+
+### Workflow
+
+```bash
+# Start backends
+docker compose up -d
+
+# Build & run your gateway
+./buck2 build //projects/llm-inference-gateway:gateway
+./buck2 run //projects/llm-inference-gateway:gateway
+
+# Run benchmarks
+./buck2 run //projects/llm-inference-gateway:bench
+
+# When you reach Part 4, everything runs in Docker
+docker compose up -d --build
+```
 
 Good luck. Start with 1.1.
