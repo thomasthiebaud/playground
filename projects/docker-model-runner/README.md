@@ -1,16 +1,18 @@
 # Docker Model Runner
 
-Build an LLM-powered application using [Docker Model Runner](https://docs.docker.com/desktop/features/model-runner/) — Docker Desktop's built-in inference engine. Start by using the OpenAI-compatible API it provides, then reimplement the inference layer yourself using [llama.cpp](https://github.com/ggerganov/llama.cpp) to understand what happens under the hood.
+Explore [Docker Model Runner](https://docs.docker.com/desktop/features/model-runner/) — Docker Desktop's built-in inference engine — then go deeper by building your own inference server with [llama.cpp](https://github.com/ggerganov/llama.cpp). Understand what Model Runner gives you for free and what it costs to do it yourself.
 
-**Language:** Go
-**Build:** Buck2 (`genrule`)
+**Language:** C/C++ (llama.cpp), Go (gateway — reuse from `llm-inference-gateway`)
 **Runtime:** Docker Desktop with Model Runner enabled
+
+> **Depends on:** Exercises in this project assume you have a working gateway from [llm-inference-gateway](../llm-inference-gateway/). You'll point that gateway at new backends here.
 
 ## Prerequisites
 
 - Docker Desktop 4.40+ with Model Runner enabled
-- Go 1.22+
-- Buck2 (available as `./buck2` at repo root)
+- Go 1.22+ (for gateway modifications)
+- C/C++ toolchain (for building llama.cpp — `gcc`/`clang`, `cmake`, `make`)
+- A completed gateway from the `llm-inference-gateway` project
 
 ### Enable Docker Model Runner
 
@@ -27,211 +29,159 @@ docker model list
 - [OpenAI Chat Completions API reference](https://platform.openai.com/docs/api-reference/chat/completions)
 - [Docker `model` CLI reference](https://docs.docker.com/reference/cli/docker/model/)
 - [llama.cpp documentation](https://github.com/ggerganov/llama.cpp)
+- [llama-server documentation](https://github.com/ggerganov/llama.cpp/tree/master/examples/server)
 - [GGUF format spec](https://github.com/ggerganov/ggml/blob/master/docs/gguf.md)
-- [Buck2 `genrule` docs](https://buck2.build/docs/prelude/globals/#genrule)
 
 ---
 
-## Part 0: Setup & First Inference
+## Part 0: Docker Model Runner as a Drop-In Backend
 
-### Exercise 0.1 — Pull a Model
+### Exercise 0.1 — Pull Models & Explore the API
 
-Pull a small model that runs well on CPU:
+Pull a small model and explore what Model Runner provides out of the box:
 
 ```bash
 docker model pull ai/llama3.2:1B-Q8_0
 ```
 
-Verify it's available and that the API is reachable.
+Model Runner exposes an OpenAI-compatible API on port `12434`. Explore it — what endpoints are available? How does the response format compare to Ollama's `/api/generate` and `/api/chat`?
 
 **Acceptance criteria:**
-- `docker model list` shows `ai/llama3.2:1B-Q8_0`
-- `curl http://localhost:12434/v1/models` returns a JSON response listing the model
-- `curl http://localhost:12434/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"ai/llama3.2:1B-Q8_0","messages":[{"role":"user","content":"Say hello in one word"}]}'` returns a valid chat completion response
+- `docker model list` shows the pulled model
+- You've hit the `/v1/models` and `/v1/chat/completions` endpoints and understand the response schema
+- You can articulate 3 differences between Model Runner's API and Ollama's API (format, fields, streaming format, token counting, etc.)
 
-### Exercise 0.2 — Buck2 Build Target
+### Exercise 0.2 — Point Your Gateway at Model Runner
 
-Create a `BUCK` file with a `genrule` that compiles a Go binary. Create a minimal Go HTTP server in `src/main.go` that listens on port 8080 and responds to `GET /health` with `{"status": "ok"}`.
+Your gateway from `llm-inference-gateway` talks to Ollama's API. Model Runner speaks OpenAI's API instead. Make your gateway work with Model Runner as a backend.
 
-**Acceptance criteria:**
-- `cd <repo-root> && ./buck2 build //projects/docker-model-runner:docker-model-runner` succeeds
-- Running the built binary and hitting `curl http://localhost:8080/health` returns `{"status": "ok"}`
-
-### Exercise 0.3 — Proxy to Model Runner
-
-Extend your server to accept `POST /v1/chat/completions` requests in OpenAI format and forward them to Docker Model Runner at `http://localhost:12434`.
-
-Stream the response back to the client. Log the model, token counts, and total duration from the response.
+Think about what needs to change:
+- Ollama uses `/api/generate` and `/api/chat` — Model Runner uses `/v1/chat/completions`
+- Ollama streams newline-delimited JSON — Model Runner streams SSE (`data: {...}`)
+- Request and response field names differ
 
 **Acceptance criteria:**
-- `curl -N http://localhost:8080/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"ai/llama3.2:1B-Q8_0","stream":true,"messages":[{"role":"user","content":"What is Docker?"}]}'` streams back SSE chunks
-- Non-streaming requests (`"stream": false`) also work and return a complete JSON response
-- Server logs show: model name, `prompt_tokens`, `completion_tokens`, and `total_tokens` from the response
+- Your gateway can proxy requests to Model Runner at `http://localhost:12434`
+- Streaming and non-streaming both work through the gateway
+- Your existing benchmark script runs against the gateway backed by Model Runner
+- Compare the numbers: how does Model Runner's throughput and latency compare to Ollama for the same model size?
+
+### Exercise 0.3 — Container-Native Access
+
+Model Runner provides `model-runner.docker.internal` — a DNS name automatically available inside any Docker container. No port mapping, no extra network config, no sidecar.
+
+Update your gateway's `docker-compose.yml` to use this instead of `host.docker.internal` or hardcoded IPs.
+
+**Acceptance criteria:**
+- Gateway container reaches Model Runner via `http://model-runner.docker.internal`
+- No `extra_hosts`, `network_mode: host`, or port mapping needed for the Model Runner connection
+- `docker compose up -d` starts the gateway and it can serve requests
+- Compare this setup to your Ollama docker-compose — how many fewer lines of configuration?
 
 ---
 
-## Part 1: Understanding the OpenAI API
+## Part 1: Build Your Own Inference Server with llama.cpp
 
-### Exercise 1.1 — Conversation Memory
+Docker Model Runner uses a bundled inference engine internally. Now build one yourself.
 
-Implement a `/v1/conversations` endpoint that maintains conversation history server-side.
+### Exercise 1.1 — Build llama.cpp from Source
 
-Design the API yourself. Think about:
-- How does a client create a new conversation?
-- How does a client send a message to an existing conversation?
-- How is the full message history sent to the model on each turn?
-- What happens when the conversation gets too long for the model's context window?
+Clone [llama.cpp](https://github.com/ggerganov/llama.cpp) and build it. The project uses `cmake`.
+
+Focus on getting `llama-server` built — this is the HTTP server component that exposes an OpenAI-compatible API.
 
 **Acceptance criteria:**
-- A client can create a conversation, send multiple messages, and receive responses that are aware of prior turns
-- Verify with a multi-turn interaction: ask the model your name, tell it your name, then ask again — it should remember
-- The conversation history is stored in memory (no persistence needed)
+- `llama-server --help` works and shows available flags
+- You understand what these build flags do: `-DGGML_CUDA=ON`, `-DGGML_METAL=ON`, `-DGGML_CPU_ALL_VARIANTS=ON` (read the docs, you may not have all the hardware)
+- You can explain: what is GGML and how does it relate to llama.cpp?
 
-### Exercise 1.2 — System Prompts & Temperature
+### Exercise 1.2 — Download a GGUF Model & Serve It
 
-Add support for per-conversation configuration:
-- A `system` prompt set at conversation creation time
-- A `temperature` parameter (0.0–2.0)
+Docker Model Runner pulls models via `docker model pull` from OCI registries. For llama.cpp, you need a raw GGUF file.
 
-Experiment with how these affect output.
+Find and download the same model you used with Model Runner (`llama3.2 1B`) in GGUF format. Start `llama-server` with it.
 
-**Acceptance criteria:**
-- Create two conversations: one with a system prompt "You are a pirate" and one with "You are a poet". Send the same user message to both — responses should differ in style
-- Send the same prompt 5 times with `temperature: 0` — responses should be nearly identical
-- Send the same prompt 5 times with `temperature: 1.5` — responses should vary significantly
-- Document your observations about temperature's effect on output quality and consistency
-
-### Exercise 1.3 — Streaming vs Non-Streaming Performance
-
-Build a benchmark script (or Go test) that compares streaming vs non-streaming for the same prompt. Measure:
-- Time to first token (streaming only)
-- Total completion time
-- Token throughput (tokens/second)
-
-Run with at least 3 different prompt lengths (short, medium, long).
+Hints: Hugging Face hosts GGUF files. Look for the quantization that matches what you pulled earlier (Q8_0).
 
 **Acceptance criteria:**
-- Benchmark outputs a table comparing streaming vs non-streaming across prompt lengths
-- Time-to-first-token is measured and reported for streaming requests
-- You can answer: Is there a throughput difference between streaming and non-streaming? Why or why not?
+- `llama-server` is running and serving on port 8081
+- `curl http://localhost:8081/v1/models` returns a response
+- `curl http://localhost:8081/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"llama3.2","messages":[{"role":"user","content":"Hello"}]}'` returns a valid response
+- The same curl command format works against both Model Runner (port 12434) and your server (port 8081)
+
+### Exercise 1.3 — Understand the Serving Parameters
+
+`llama-server` has many knobs that affect performance. Experiment with these flags and observe the impact:
+
+- `-c` (context size)
+- `-np` (number of parallel slots)
+- `-ngl` (number of GPU layers — if you have a GPU)
+- `--threads` / `-t`
+- `--batch-size` / `-b`
+
+**Acceptance criteria:**
+- Run a fixed benchmark (same prompt, 10 requests) under at least 3 different configurations (vary context size, thread count, parallel slots)
+- Record tokens/second for each configuration
+- You can answer: What is a "slot" in llama-server? What happens when all slots are busy? How does context size affect memory usage and speed?
+
+### Exercise 1.4 — Containerize llama-server
+
+Write a Dockerfile that builds llama.cpp from source and produces an image with `llama-server`. The model GGUF file should be provided at runtime via a volume mount, not baked into the image.
+
+**Acceptance criteria:**
+- `docker build -t llama-server .` succeeds
+- `docker run -v /path/to/models:/models -p 8081:8081 llama-server -m /models/llama3.2-1B-Q8_0.gguf --host 0.0.0.0 --port 8081` starts serving
+- Image builds are reproducible (pinned base image, specific llama.cpp commit)
+- You can answer: why mount the model as a volume instead of `COPY` in the Dockerfile?
 
 ---
 
-## Part 2: Multi-Model Routing
+## Part 2: Dual Backend Gateway
 
-### Exercise 2.1 — Pull Multiple Models
+### Exercise 2.1 — Backend Abstraction
 
-Pull a second, larger model:
+Refactor your gateway to support multiple backend types behind a common interface. You now have three possible backends:
 
-```bash
-docker model pull ai/llama3.2:3B-Q4_K_M
-```
+1. **Ollama** — `/api/chat`, newline-delimited JSON streaming
+2. **Docker Model Runner** — `/v1/chat/completions`, SSE streaming
+3. **llama-server** — `/v1/chat/completions`, SSE streaming (same API as Model Runner)
 
-Verify both models are available via the API.
-
-**Acceptance criteria:**
-- `docker model list` shows both models
-- `curl http://localhost:12434/v1/models` lists both
-- You can send a chat completion to each model individually and get responses
-
-### Exercise 2.2 — Model Router
-
-Add a routing layer to your proxy. Requests include a `model` field — route to the correct model. If the requested model isn't available, return a `404` with a helpful error listing available models.
-
-Add a `GET /v1/models` endpoint to your proxy that queries Model Runner and returns the available models.
+Design a backend interface in Go. What's the minimal contract? Think about:
+- How do you abstract over different request/response formats?
+- Model Runner and llama-server share the same API — how do you handle that cleanly?
+- Where does backend selection happen (config, per-request, auto)?
 
 **Acceptance criteria:**
-- Requests specifying `ai/llama3.2:1B-Q8_0` get routed to the 1B model
-- Requests specifying `ai/llama3.2:3B-Q4_K_M` get routed to the 3B model
-- Requesting a non-existent model returns `404` with available model names
-- `GET /v1/models` on your proxy returns the list from Model Runner
+- Gateway supports all three backend types
+- Backend is selectable via environment variable (`BACKEND=ollama|model-runner|llama-cpp`)
+- All three backends produce the same response format to the client (your gateway normalizes)
+- Adding a new OpenAI-compatible backend in the future would require minimal code
 
-### Exercise 2.3 — Complexity-Based Routing
+### Exercise 2.2 — Docker Compose Full Stack
 
-Instead of requiring clients to pick a model, implement automatic routing based on prompt complexity. Design a heuristic — consider:
-- Prompt length (token count estimate)
-- Presence of keywords suggesting complex reasoning
-- Conversation history length
+Write a `docker-compose.yml` that runs:
+1. Your containerized llama-server (from Exercise 1.4) with a mounted GGUF model
+2. Your gateway, configured to route to llama-server
 
-Route simple queries to the small/fast model and complex queries to the larger model.
-
-**Acceptance criteria:**
-- "What is 2+2?" routes to the 1B model
-- A long prompt with multiple constraints routes to the 3B model
-- Log which model was selected and why for each request
-- Benchmark: compare latency of auto-routed requests vs always using the 3B model. For simple prompts, the small model should be noticeably faster
-
----
-
-## Part 3: Containerize & Compose
-
-### Exercise 3.1 — Dockerfile
-
-Write a multi-stage Dockerfile for your Go gateway:
-- **Build stage:** compile the Go binary
-- **Runtime stage:** minimal image (e.g., `scratch` or `distroless`) with just the binary
+Then write a second compose override or profile that swaps the backend to Model Runner (using `model-runner.docker.internal`) with no llama-server container needed.
 
 **Acceptance criteria:**
-- `docker build -t model-runner-gateway .` succeeds (run from project directory)
-- `docker run --rm model-runner-gateway /gateway --help` or similar shows the binary runs
-- Final image size is under 20 MB
+- `docker compose --profile llama up -d` starts gateway + llama-server
+- `docker compose --profile model-runner up -d` starts gateway only (uses Model Runner)
+- Both profiles serve the same API to clients on the same port
+- You can answer: what are the operational trade-offs? (image size, startup time, resource usage, configuration complexity)
 
-### Exercise 3.2 — Docker Compose with Model Runner
+### Exercise 2.3 — Head-to-Head Benchmark
 
-Write a `docker-compose.yml` that runs your gateway. The gateway should reach Docker Model Runner via `model-runner.docker.internal` (the built-in DNS name available to all containers when Model Runner is enabled).
+Build a benchmark that compares all backends you have available. Same model (or closest equivalent), same prompts, same concurrency levels.
 
-**Acceptance criteria:**
-- `docker compose up -d` starts the gateway
-- `curl http://localhost:8080/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"ai/llama3.2:1B-Q8_0","messages":[{"role":"user","content":"Hello"}]}'` returns a response
-- The gateway connects to Model Runner without any extra network configuration or port mapping — just `http://model-runner.docker.internal`
-- `docker compose logs gateway` shows requests being proxied successfully
-
-### Exercise 3.3 — Health Check & Readiness
-
-Add a health check to your docker-compose service that verifies the gateway can reach Model Runner. The gateway should not accept traffic until at least one model is available.
+Measure:
+- Tokens per second (streaming)
+- Time to first token
+- p50 / p99 latency under load (1, 5, 10 concurrent requests)
+- Memory usage (`docker stats` for containers, `/v1/health` or process stats for native)
 
 **Acceptance criteria:**
-- `docker compose ps` shows the gateway as `healthy`
-- If Model Runner is unreachable, the health check fails and Docker reports `unhealthy`
-- The gateway's `/health` endpoint returns model availability info (e.g., `{"status": "ok", "models": 2}`)
-
----
-
-## Part 4: Build It Yourself with llama.cpp
-
-Now that you understand the API contract from the consumer side, reimplement the inference layer yourself.
-
-### Exercise 4.1 — Build llama.cpp
-
-Clone and build [llama.cpp](https://github.com/ggerganov/llama.cpp) from source. Get the `llama-server` binary running with a GGUF model file.
-
-**Acceptance criteria:**
-- `llama-server` starts and serves on a port you choose (e.g., 8081)
-- It exposes an OpenAI-compatible `/v1/chat/completions` endpoint
-- The same `curl` command you used against Docker Model Runner works against your `llama-server` instance
-- Compare response quality and speed between Docker Model Runner and your `llama-server` for the same model and prompt
-
-### Exercise 4.2 — Dual Backend
-
-Update your gateway to support both backends: Docker Model Runner and your self-hosted llama.cpp server. Add configuration to specify which backend to use (environment variable or request header).
-
-**Acceptance criteria:**
-- Gateway can route to Docker Model Runner (`model-runner.docker.internal`) or llama.cpp (`localhost:8081`)
-- A request with `X-Backend: model-runner` goes to Docker Model Runner
-- A request with `X-Backend: llama-cpp` goes to llama.cpp
-- Default backend is configurable via environment variable
-- Both backends return responses in the same OpenAI-compatible format — the client doesn't need to know which backend served the request
-
-### Exercise 4.3 — Comparative Benchmarks
-
-Build a comprehensive benchmark comparing both backends. Measure for each:
-- Tokens per second
-- Time to first token (streaming)
-- Memory usage (check Docker stats / process stats)
-- Behavior under concurrent load (5, 10, 20 simultaneous requests)
-
-**Acceptance criteria:**
-- Benchmark script outputs a comparison table for both backends
-- Results include p50, p95, and p99 latency at each concurrency level
-- Memory usage is captured before and during load
-- You can answer: What are the trade-offs between using Docker Model Runner vs self-hosted llama.cpp? When would you choose each?
+- Benchmark script outputs a comparison table across backends and concurrency levels
+- Results are reproducible (document exact model, quantization, and hardware)
+- You can answer: Does Docker Model Runner add overhead vs running llama-server directly? When would you choose each approach?

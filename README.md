@@ -7,7 +7,7 @@ A monorepo for hands-on systems engineering experiments. Each project is self-co
 | Project | Description |
 |---------|-------------|
 | [llm-inference-gateway](projects/llm-inference-gateway/) | LLM inference optimization, load balancing, and traffic management using Ollama |
-| [docker-model-runner](projects/docker-model-runner/) | LLM gateway with Docker Model Runner and self-hosted llama.cpp backend |
+| [docker-model-runner](projects/docker-model-runner/) | Docker Model Runner as a backend, then build your own inference server with llama.cpp |
 
 ## Future Work
 
