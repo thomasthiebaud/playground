@@ -2,17 +2,14 @@
 
 A structured learning path for LLM inference systems engineering. Covers the full stack from transformer mechanics to fleet orchestration — the skills needed to build and operate inference infrastructure at scale.
 
-**Language:** Rust (gateway), C/C++ (llama.cpp)
-**Build:** Buck2, Cargo
+**Language:** Rust (gateway)
+**Build:** Buck2
 **Runtime:** Docker Desktop with Model Runner, self-hosted llama.cpp
 
 ## Prerequisites
 
 - Docker Desktop 4.40+ with Model Runner enabled
-- Rust 1.75+ (install via [rustup](https://rustup.rs))
-- C/C++ toolchain (`gcc`/`clang`, `cmake`, `make`)
 - Buck2 (available as `./buck2` at repo root)
-- Python 3.11+ (for benchmarking scripts and vLLM in Part 4)
 
 ### Enable Docker Model Runner
 
@@ -25,15 +22,15 @@ docker model list
 
 ### Reference Docs
 
+Keep these open — they're used across multiple exercises:
+
 - [Docker Model Runner docs](https://docs.docker.com/desktop/features/model-runner/)
 - [OpenAI Chat Completions API reference](https://platform.openai.com/docs/api-reference/chat/completions)
 - [llama.cpp documentation](https://github.com/ggerganov/llama.cpp)
 - [llama-server documentation](https://github.com/ggerganov/llama.cpp/tree/master/examples/server)
-- [GGUF format spec](https://github.com/ggerganov/ggml/blob/master/docs/gguf.md)
-- [vLLM documentation](https://docs.vllm.ai/)
-- [Efficient Memory Management for Large Language Model Serving with PagedAttention](https://arxiv.org/abs/2309.06180)
-- [Orca: A Distributed Serving System for Transformer-Based Generative Models](https://www.usenix.org/conference/osdi22/presentation/yu)
 - [Buck2 `genrule` docs](https://buck2.build/docs/prelude/globals/#genrule)
+
+Papers and blog posts are linked inline in the exercises that use them.
 
 ---
 
@@ -48,11 +45,10 @@ Read and understand the two distinct phases of autoregressive LLM inference:
 1. **Prefill** (prompt processing): all input tokens are processed in parallel to build the KV cache
 2. **Decode** (token generation): tokens are generated one at a time, each attending to the full KV cache
 
-**Reading list:**
-- [The Illustrated Transformer](https://jalammar.github.io/illustrated-transformer/) — visual walkthrough of attention, the building block of everything below
-- [LLM Inference](https://www.databricks.com/blog/llm-inference-performance-engineering-best-practices) — Databricks deep-dive on prefill vs decode, memory-bandwidth bottleneck, KV cache sizing
-- [Transformer Inference Arithmetic](https://kipp.ly/transformer-inference-arithmetic/) — the math behind why decode is memory-bound: how to calculate memory bandwidth requirements from model dimensions
-- [A Survey on Efficient Inference for Large Language Models](https://arxiv.org/abs/2404.14294) — sections 2–3 cover the inference pipeline and bottleneck analysis (skim the rest for later)
+**Start here:**
+1. Read [The Illustrated Transformer](https://jalammar.github.io/illustrated-transformer/). Then explain in your own words how self-attention works and why its cost is quadratic in sequence length.
+2. Read [Transformer Inference Arithmetic](https://kipp.ly/transformer-inference-arithmetic/). Then calculate, for a 1B parameter model on your hardware: what's the theoretical max tokens/sec during decode? (hint: it's `memory_bandwidth / (model_size_bytes)` — verify this against your actual benchmark numbers from 0.3)
+3. Read the Databricks post [LLM Inference Performance Engineering](https://www.databricks.com/blog/llm-inference-performance-engineering-best-practices). Then answer: for your 1B model, is prefill or decode the bottleneck at a 500-token prompt with 100-token completion? What about a 50-token prompt with 500-token completion?
 
 **Acceptance criteria — you can answer:**
 - Why is prefill compute-bound and decode memory-bandwidth-bound?
@@ -74,32 +70,30 @@ docker model pull ai/llama3.2:1B-Q8_0
 
 Send the same prompts to both. Compare output quality, speed, and memory usage.
 
-**Reading list:**
-- [GGUF format spec — quantization types](https://github.com/ggerganov/ggml/blob/master/docs/gguf.md) — what Q4_K_M, Q8_0, etc. actually mean
-- [Introduction to Quantization](https://mlabonne.github.io/blog/posts/Introduction_to_Weight_Quantization.html) — visual guide to how weights are mapped to lower precision
-- [Which GGUF is right for me?](https://www.reddit.com/r/LocalLLaMA/wiki/index/#wiki_which_gguf_quantization_is_right_for_me.3F) — practical guidance on quality/speed trade-offs for common quant levels
+1. Read the [GGUF format spec](https://github.com/ggerganov/ggml/blob/master/docs/gguf.md) — find the section on quantization types. What's the difference between Q4_0 and Q4_K_M? What does the "K" mean?
+2. Read [Introduction to Quantization](https://mlabonne.github.io/blog/posts/Introduction_to_Weight_Quantization.html). Then calculate: a 1B model in FP16 is ~2GB. How large should Q8_0 and Q4_K_M be? Verify against the actual file sizes Docker pulled.
+3. Send the same 10 prompts to both Q4_K_M and Q8_0 using your bench tool. Record tokens/sec, and eyeball output quality differences.
 
 **Acceptance criteria:**
 - You can explain what quantization does (reduce weight precision from FP16 → INT8/INT4)
-- You've measured tokens/sec for Q4_K_M vs Q8_0 on the same hardware
+- You've measured tokens/sec and model size for Q4_K_M vs Q8_0 on the same hardware
 - You can articulate the quality/speed/memory trade-off
-- You understand what "K-quant" means in GGUF quantization names
 - You can answer: when would you choose Q4 over Q8? When would neither be acceptable?
 
 ---
 
 ### 0.3 — Benchmarking Fundamentals
 
-Before building anything, establish your measurement toolkit. Write a Python script that:
-- Sends requests to `http://localhost:12434/v1/chat/completions`
+Before building anything, establish your measurement toolkit. Write a Rust CLI tool that:
+- Sends requests to a configurable OpenAI-compatible endpoint
 - Measures: time to first token (TTFT), time per output token (TPOT), end-to-end latency, tokens/sec
 - Supports both streaming and non-streaming
 - Runs N concurrent requests and reports p50, p95, p99
 
-You'll reuse this throughout every exercise.
+Create a Buck2 target for this tool. You'll reuse it throughout every exercise.
 
 **Acceptance criteria:**
-- Script can benchmark any OpenAI-compatible endpoint
+- `./buck2 run //projects/llm-local-inference:bench -- --url http://localhost:12434 --concurrency 10` works
 - Outputs a clean table with TTFT, TPOT, throughput, and latency percentiles
 - You understand why TTFT and TPOT are the two metrics that matter most for user experience
 - You can answer: why does TTFT increase with prompt length? Why does TPOT stay roughly constant regardless of prompt length?
@@ -153,7 +147,7 @@ Download the same model you used with Model Runner (Llama 3.2 1B, Q8_0 quantizat
 **Acceptance criteria:**
 - `llama-server` running on port 8081
 - Same curl commands work against both Model Runner (:12434) and your server (:8081)
-- Run your benchmark script from 0.3 against both — compare numbers
+- Run your bench tool from 0.3 against both — compare numbers
 
 ---
 
@@ -161,9 +155,8 @@ Download the same model you used with Model Runner (Llama 3.2 1B, Q8_0 quantizat
 
 `llama-server` uses **slots** — fixed context windows that requests are assigned to. This is its batching mechanism.
 
-**Reading list:**
-- [How continuous batching enables 23x throughput in LLM inference](https://www.anyscale.com/blog/continuous-batching-llm-inference) — clear explanation with diagrams of static vs continuous batching
-- [Orca: A Distributed Serving System for Transformer-Based Generative Models](https://www.usenix.org/conference/osdi22/presentation/yu) — the paper that introduced iteration-level scheduling
+1. Read [How continuous batching enables 23x throughput](https://www.anyscale.com/blog/continuous-batching-llm-inference). Then draw the timeline of 4 requests (10, 50, 100, 200 tokens) under static batching vs continuous batching. Predict: how much faster should continuous batching be for this mix?
+2. Read the [Orca paper](https://www.usenix.org/conference/osdi22/presentation/yu) (sections 1–4). Then verify your prediction by running the experiment below.
 
 Experiment with these flags:
 
@@ -186,10 +179,9 @@ Experiment with these flags:
 
 Observe KV cache behavior in llama-server by watching its logs and `/health` endpoint.
 
-**Reading list:**
-- [How prompt caching works — Paged Attention and Automatic Prefix Caching](https://sankalp.bearblog.dev/how-prompt-caching-works/) — walks through how prefix caching is implemented at the KV cache level
-- [Prompt Caching with Anthropic](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching) — how a production API exposes prefix caching to users (the feature you'd be building)
-- [Dissecting Batching Effects in GPT Inference](https://le.qun.ch/en/blog/2023/05/13/transformer-batching/) — concrete numbers on how KV cache memory scales with batch size and sequence length
+1. Read [How prompt caching works](https://sankalp.bearblog.dev/how-prompt-caching-works/). Then predict: for your 1B model, how much memory does the KV cache consume per token? Verify by running llama-server with `-c 512` vs `-c 4096` and comparing RSS.
+2. Read [Dissecting Batching Effects in GPT Inference](https://le.qun.ch/en/blog/2023/05/13/transformer-batching/). Then answer: how does KV cache memory scale with batch size? With sequence length? Which dominates at high concurrency?
+3. Read [Prompt Caching — Anthropic docs](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching). This is the user-facing feature you'd be building. Note how it's exposed in the API. Then run the experiments below.
 
 **Experiments:**
 1. Send 20 requests with the same system prompt, different user messages. Note prompt processing speed.
@@ -207,10 +199,9 @@ Observe KV cache behavior in llama-server by watching its logs and `/health` end
 
 llama-server supports grammar-constrained generation via the `response_format` field (JSON mode) and GBNF grammars.
 
-**Reading list:**
-- [Efficient Guided Generation for Large Language Models](https://arxiv.org/abs/2307.09702) — the Outlines paper: how to constrain generation to a grammar without affecting quality
-- [llama.cpp GBNF grammar guide](https://github.com/ggerganov/llama.cpp/blob/master/grammars/README.md) — syntax and examples for writing grammars
-- [Structured Outputs — OpenAI](https://platform.openai.com/docs/guides/structured-outputs) — how a production API exposes constrained decoding (the feature you'd be building)
+1. Read the [llama.cpp GBNF grammar guide](https://github.com/ggerganov/llama.cpp/blob/master/grammars/README.md). You'll need this syntax for the experiments below.
+2. Read the [Outlines paper](https://arxiv.org/abs/2307.09702) (sections 1–3). Then answer: how does constrained decoding guarantee valid output without resampling or retrying?
+3. Read [Structured Outputs — OpenAI docs](https://platform.openai.com/docs/guides/structured-outputs). This is the user-facing feature. Note the API design (how `response_format` works).
 
 **Experiments:**
 1. Send a request with `"response_format": {"type": "json_object"}` — observe the output
@@ -249,20 +240,20 @@ Build an HTTP server in Rust that:
 - Streams SSE responses back to the client
 - Logs model, token counts, and latency
 
-Use `tokio`, `hyper` or `axum`, and `reqwest`. Set up a Cargo workspace in `src/`.
+Create a Buck2 target for the gateway. Look into `tokio`, `hyper` or `axum`, and `reqwest`.
 
 **Acceptance criteria:**
+- `./buck2 run //projects/llm-local-inference:gateway` starts the server
 - Streaming and non-streaming requests both work through your proxy
-- Your benchmark script from 0.3 works against the proxy
+- Your bench tool from 0.3 works against the proxy
 - Proxy adds < 5ms overhead vs hitting Model Runner directly
 
 ---
 
 ### 2.2 — Request Queuing & Admission Control
 
-**Reading list:**
-- [Performance Under Load — Netflix](https://netflixtechblog.medium.com/performance-under-load-3e6fa9a60581) — adaptive concurrency limiting in production (you'll implement a version of this in 2.7)
-- [Little's Law](https://en.wikipedia.org/wiki/Little%27s_law) — the fundamental relationship between throughput, concurrency, and latency: L = λW. Useful for reasoning about queue sizing
+1. Read [Little's Law](https://en.wikipedia.org/wiki/Little%27s_law). Then calculate: if your backend handles 5 req/sec with 2s average latency, what's the expected queue depth at 8 req/sec inbound? Verify with your bench tool.
+2. Read [Performance Under Load — Netflix](https://netflixtechblog.medium.com/performance-under-load-3e6fa9a60581). You'll implement their adaptive concurrency limiter in exercise 2.7.
 
 Add a bounded queue in front of the backend.
 
@@ -328,6 +319,22 @@ Questions:
 
 ---
 
+### 2.7 — Adaptive Concurrency Limiting
+
+Your fixed concurrency limit from 2.2 is fragile — too low wastes capacity, too high causes latency spikes. Make it adaptive.
+
+- Start with a concurrency limit of 5
+- Track p99 latency over a rolling window (last 50 requests)
+- If p99 rises above 2x your baseline → reduce limit by 1
+- If p99 is healthy → increase by 1
+- Bounds: 1–20
+
+This is the Netflix pattern from the paper you read in 2.2.
+
+**Test:** gradually ramp load from 1 to 30 req/sec. Log the concurrency limit over time — it should climb during healthy load and drop when latency spikes.
+
+---
+
 ## Part 3: Multi-Backend Routing
 
 Scale to multiple inference servers and route intelligently.
@@ -366,9 +373,8 @@ Track in-flight requests per backend. Route to the one with the fewest.
 
 ### 3.5 — Prefix-Aware Routing
 
-**Reading list:**
-- [Consistent Hashing and Random Trees](https://www.cs.princeton.edu/courses/archive/fall09/cos518/papers/chash.pdf) — the original consistent hashing paper (short, readable)
-- [Prompt Cache: Modular Attention Reuse for Low-Latency Inference](https://arxiv.org/abs/2311.04934) — how prefix-aware routing improves cache hit rates in multi-server setups
+1. Read [Consistent Hashing and Random Trees](https://www.cs.princeton.edu/courses/archive/fall09/cos518/papers/chash.pdf) (short). Implement a consistent hash ring — you'll use it below.
+2. Read [Prompt Cache: Modular Attention Reuse](https://arxiv.org/abs/2311.04934) (sections 1–3). Then predict: for 3 backends with 60 requests split 50/50 between two system prompts, what's the expected cache hit rate with consistent hashing vs round-robin?
 
 Route requests with the same system prompt to the same backend to maximize KV cache hits.
 
@@ -411,9 +417,9 @@ This is the most important section for understanding modern inference systems.
 
 > **Format:** Paper study + local experiment
 
-Read the [Orca paper](https://www.usenix.org/conference/osdi22/presentation/yu) and understand why iteration-level scheduling matters.
+Read the [Orca paper](https://www.usenix.org/conference/osdi22/presentation/yu) — focus on sections 2–4. After reading, predict the throughput improvement you'd expect from iteration-level scheduling vs request-level scheduling for the workload below.
 
-**Local experiment:** You can observe continuous batching in llama-server directly. Run it with `-np 4` (4 slots) and fire 4 requests simultaneously with very different `max_tokens` (10, 50, 100, 200). Log when each response completes. Then compare with `-np 1` — the 4 requests now serialize. The difference in total wall-clock time is the benefit of continuous batching.
+**Local experiment:** Verify your prediction using llama-server. Run it with `-np 4` (4 slots) and fire 4 requests simultaneously with very different `max_tokens` (10, 50, 100, 200). Log when each response completes. Then compare with `-np 1` — the 4 requests now serialize. The difference in total wall-clock time is the benefit of continuous batching.
 
 **Acceptance criteria — you can explain:**
 - In static batching, why does the shortest request in a batch waste compute while waiting for the longest?
@@ -427,9 +433,9 @@ Read the [Orca paper](https://www.usenix.org/conference/osdi22/presentation/yu) 
 
 > **Format:** Paper study + local experiment
 
-Read the [PagedAttention paper](https://arxiv.org/abs/2309.06180) and explore [vLLM](https://docs.vllm.ai/).
+Read the [PagedAttention paper](https://arxiv.org/abs/2309.06180) — focus on sections 1–4. Then calculate: for your 1B model with 4 concurrent requests at 2048 context each, how much KV cache memory is wasted under pre-allocated (naive) allocation vs paged allocation?
 
-**Local experiment:** You can observe KV cache memory pressure in llama-server. Run with a small context (`-c 512 -np 4` = 128 tokens per slot). Send requests with increasing prompt lengths and watch what happens when a prompt exceeds the per-slot context. Then run with `-c 4096 -np 4` and observe memory usage (`docker stats` or process RSS). The difference illustrates why KV cache memory management matters — and why PagedAttention's approach of allocating on-demand instead of pre-allocating is so impactful.
+**Local experiment:** Observe KV cache memory pressure in llama-server. Run with a small context (`-c 512 -np 4` = 128 tokens per slot). Send requests with increasing prompt lengths and watch what happens when a prompt exceeds the per-slot context. Then run with `-c 4096 -np 4` and observe memory usage (`docker stats` or process RSS). The difference illustrates why KV cache memory management matters — and why PagedAttention's approach of allocating on-demand instead of pre-allocating is so impactful.
 
 **Acceptance criteria — you can explain:**
 - What problem does PagedAttention solve? (hint: KV cache memory fragmentation)
@@ -443,14 +449,13 @@ Read the [PagedAttention paper](https://arxiv.org/abs/2309.06180) and explore [v
 
 > **Format:** Hands-on (if you have a CUDA GPU), otherwise skip
 
-If you have a GPU, install and run vLLM:
+If you have a GPU, run vLLM via Docker:
 
 ```bash
-pip install vllm
-vllm serve meta-llama/Llama-3.2-1B --dtype auto
+docker run --gpus all -p 8082:8000 vllm/vllm-openai --model meta-llama/Llama-3.2-1B --dtype auto
 ```
 
-vLLM exposes the same OpenAI-compatible API. Point your benchmark script at it.
+vLLM exposes the same OpenAI-compatible API. Point your bench tool at it.
 
 **Acceptance criteria:**
 - Compare tokens/sec between vLLM, llama-server, and Docker Model Runner for the same model
@@ -463,11 +468,8 @@ vLLM exposes the same OpenAI-compatible API. Point your benchmark script at it.
 
 > **Format:** Research + local experiment
 
-Research speculative decoding — a technique for faster inference without quality loss.
-
-**Reading list:**
-- [Fast Inference from Transformers via Speculative Decoding](https://arxiv.org/abs/2211.17192) — the original speculative decoding paper
-- [Speculative Decoding — Hugging Face](https://huggingface.co/blog/whisper-speculative-decoding) — accessible explainer with diagrams of the draft-verify loop
+1. Read [Speculative Decoding — Hugging Face](https://huggingface.co/blog/whisper-speculative-decoding) for an accessible overview with diagrams.
+2. Read the [original paper](https://arxiv.org/abs/2211.17192) (sections 1–3). Then calculate: if the draft model proposes 5 tokens and the acceptance rate is 70%, what's the expected speedup over standard decoding? Verify with the experiment below.
 
 **Local experiment:** llama-server supports speculative decoding via the `--draft` flag. Download a smaller model (e.g., Llama 3.2 1B as draft for a 3B target). Run `llama-server -m <3B-model> --draft <1B-model> -nd <num-draft-tokens>` and benchmark against the 3B model alone. Measure tokens/sec and observe the acceptance rate in the logs.
 
@@ -487,7 +489,7 @@ If you only have the 1B model, you can still experiment: llama.cpp also supports
 ### 5.1 — Containerize the Gateway
 
 Multi-stage Dockerfile for your Rust gateway:
-- Build stage: compile with `cargo build --release`
+- Build stage: compile the release binary
 - Runtime stage: minimal image (`debian-slim` or `distroless`) with just the binary
 
 **Acceptance criteria:**
@@ -512,9 +514,8 @@ Questions: what are the operational trade-offs? (startup time, resource usage, s
 
 ### 5.3 — Autoscaling Signals
 
-**Reading list:**
-- [Prometheus Exposition Format](https://prometheus.io/docs/instrumenting/exposition_formats/) — the format your `/metrics` endpoint should produce
-- [Autopilot: Workload Autoscaling at Google Scale](https://research.google/pubs/autopilot-workload-autoscaling-at-google-scale/) — how Google autoscales ML workloads (the kind of system you'd build at Anthropic)
+1. Read the [Prometheus Exposition Format](https://prometheus.io/docs/instrumenting/exposition_formats/) spec. Your `/metrics` endpoint must produce this format.
+2. Read [Autopilot: Workload Autoscaling at Google Scale](https://research.google/pubs/autopilot-workload-autoscaling-at-google-scale/). Then design your autoscaler signals based on what you learn about lag-based vs utilization-based scaling.
 
 Expose a `/metrics` endpoint (Prometheus format) reporting:
 - Request queue depth
@@ -542,10 +543,9 @@ Implement a simple autoscaler controller:
 
 You're deploying a new model version to a fleet serving production traffic.
 
-**Reading list:**
-- [Kubernetes Deployment Strategies](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#strategy) — blue/green and rolling updates in the system you'd likely use in production
-- [Canary Releases — Martin Fowler](https://martinfowler.com/bliki/CanaryRelease.html) — concise overview of the pattern
-- [Safe model deployment at Anthropic](https://docs.anthropic.com/en/docs/about-claude/models) — observe how Anthropic versions models (claude-3-5-sonnet-20241022 etc.) and think about what that implies for deployment infrastructure
+1. Read [Canary Releases — Martin Fowler](https://martinfowler.com/bliki/CanaryRelease.html). Then design: what metrics would you check before promoting a canary?
+2. Read [Kubernetes Deployment Strategies](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#strategy). Then answer: why is a rolling update insufficient for model deployments? (hint: model loading time)
+3. Look at [Anthropic's model versioning](https://docs.anthropic.com/en/docs/about-claude/models) (e.g. `claude-3-5-sonnet-20241022`). What does this naming imply about their deployment infrastructure?
 
 Research and design strategies for:
 
@@ -574,11 +574,9 @@ Research and design strategies for:
 
 Research how large models are served across multiple GPUs and accelerator types.
 
-**Reading list:**
-- [Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism](https://arxiv.org/abs/1909.08053) — introduces tensor and pipeline parallelism (training paper, but the same sharding applies to inference)
-- [Efficiently Scaling Transformer Inference](https://arxiv.org/abs/2211.05102) — Google's analysis of how to partition models across TPUs for inference, covers all parallelism strategies
-- [How GPUs Work — Nvidia](https://developer.nvidia.com/blog/cuda-refresher-reviewing-the-origins-of-gpu-computing/) — foundational GPU architecture if you need it
-- [AWS Trainium / Inferentia overview](https://aws.amazon.com/machine-learning/trainium/) — an example of a non-GPU accelerator to understand what "hardware-agnostic" means in practice
+1. Read [Megatron-LM](https://arxiv.org/abs/1909.08053) (sections 2–3) — it introduces tensor and pipeline parallelism. Then draw: how would you shard a 70B model across 8 GPUs using tensor parallelism? What about pipeline parallelism? What's the communication pattern for each?
+2. Read [Efficiently Scaling Transformer Inference](https://arxiv.org/abs/2211.05102) — Google's analysis of partitioning for inference. Then answer: for a latency-sensitive chat API, would you prefer tensor or pipeline parallelism? Why?
+3. Read [AWS Trainium / Inferentia overview](https://aws.amazon.com/machine-learning/trainium/). Then answer: what does "hardware-agnostic" mean in practice? What abstraction would your gateway need to treat GPU and Trainium backends interchangeably?
 
 **Local simulation:** You can't run multi-GPU tensor parallelism locally (without multiple GPUs), but you can simulate **pipeline parallelism** at the gateway level. llama-server's `-ngl` flag controls how many layers are offloaded to GPU (or in CPU-only mode, you can think of it as a layer split). Run two llama-server instances and imagine they each hold half the model layers — your gateway would need to chain them (request → instance 1 → instance 2 → response). Build a simple pipeline proxy that forwards through two backends sequentially and measure the latency overhead vs a single backend. This is a toy version of pipeline parallelism's communication cost.
 
