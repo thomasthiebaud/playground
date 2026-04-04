@@ -48,7 +48,11 @@ Read and understand the two distinct phases of autoregressive LLM inference:
 1. **Prefill** (prompt processing): all input tokens are processed in parallel to build the KV cache
 2. **Decode** (token generation): tokens are generated one at a time, each attending to the full KV cache
 
-Research these concepts using the papers linked above, blog posts, and the llama.cpp source code.
+**Reading list:**
+- [The Illustrated Transformer](https://jalammar.github.io/illustrated-transformer/) — visual walkthrough of attention, the building block of everything below
+- [LLM Inference](https://www.databricks.com/blog/llm-inference-performance-engineering-best-practices) — Databricks deep-dive on prefill vs decode, memory-bandwidth bottleneck, KV cache sizing
+- [Transformer Inference Arithmetic](https://kipp.ly/transformer-inference-arithmetic/) — the math behind why decode is memory-bound: how to calculate memory bandwidth requirements from model dimensions
+- [A Survey on Efficient Inference for Large Language Models](https://arxiv.org/abs/2404.14294) — sections 2–3 cover the inference pipeline and bottleneck analysis (skim the rest for later)
 
 **Acceptance criteria — you can answer:**
 - Why is prefill compute-bound and decode memory-bandwidth-bound?
@@ -70,11 +74,16 @@ docker model pull ai/llama3.2:1B-Q8_0
 
 Send the same prompts to both. Compare output quality, speed, and memory usage.
 
+**Reading list:**
+- [GGUF format spec — quantization types](https://github.com/ggerganov/ggml/blob/master/docs/gguf.md) — what Q4_K_M, Q8_0, etc. actually mean
+- [Introduction to Quantization](https://mlabonne.github.io/blog/posts/Introduction_to_Weight_Quantization.html) — visual guide to how weights are mapped to lower precision
+- [Which GGUF is right for me?](https://www.reddit.com/r/LocalLLaMA/wiki/index/#wiki_which_gguf_quantization_is_right_for_me.3F) — practical guidance on quality/speed trade-offs for common quant levels
+
 **Acceptance criteria:**
 - You can explain what quantization does (reduce weight precision from FP16 → INT8/INT4)
 - You've measured tokens/sec for Q4_K_M vs Q8_0 on the same hardware
 - You can articulate the quality/speed/memory trade-off
-- You understand what "K-quant" means in GGUF quantization names (hint: read the GGUF spec)
+- You understand what "K-quant" means in GGUF quantization names
 - You can answer: when would you choose Q4 over Q8? When would neither be acceptable?
 
 ---
@@ -152,6 +161,10 @@ Download the same model you used with Model Runner (Llama 3.2 1B, Q8_0 quantizat
 
 `llama-server` uses **slots** — fixed context windows that requests are assigned to. This is its batching mechanism.
 
+**Reading list:**
+- [How continuous batching enables 23x throughput in LLM inference](https://www.anyscale.com/blog/continuous-batching-llm-inference) — clear explanation with diagrams of static vs continuous batching
+- [Orca: A Distributed Serving System for Transformer-Based Generative Models](https://www.usenix.org/conference/osdi22/presentation/yu) — the paper that introduced iteration-level scheduling
+
 Experiment with these flags:
 
 - `-c` (total context size across all slots)
@@ -173,6 +186,11 @@ Experiment with these flags:
 
 Observe KV cache behavior in llama-server by watching its logs and `/health` endpoint.
 
+**Reading list:**
+- [How prompt caching works — Paged Attention and Automatic Prefix Caching](https://sankalp.bearblog.dev/how-prompt-caching-works/) — walks through how prefix caching is implemented at the KV cache level
+- [Prompt Caching with Anthropic](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching) — how a production API exposes prefix caching to users (the feature you'd be building)
+- [Dissecting Batching Effects in GPT Inference](https://le.qun.ch/en/blog/2023/05/13/transformer-batching/) — concrete numbers on how KV cache memory scales with batch size and sequence length
+
 **Experiments:**
 1. Send 20 requests with the same system prompt, different user messages. Note prompt processing speed.
 2. Send 20 requests each with unique system prompts. Compare.
@@ -188,6 +206,11 @@ Observe KV cache behavior in llama-server by watching its logs and `/health` end
 ### 1.5 — Structured Output (Constrained Decoding)
 
 llama-server supports grammar-constrained generation via the `response_format` field (JSON mode) and GBNF grammars.
+
+**Reading list:**
+- [Efficient Guided Generation for Large Language Models](https://arxiv.org/abs/2307.09702) — the Outlines paper: how to constrain generation to a grammar without affecting quality
+- [llama.cpp GBNF grammar guide](https://github.com/ggerganov/llama.cpp/blob/master/grammars/README.md) — syntax and examples for writing grammars
+- [Structured Outputs — OpenAI](https://platform.openai.com/docs/guides/structured-outputs) — how a production API exposes constrained decoding (the feature you'd be building)
 
 **Experiments:**
 1. Send a request with `"response_format": {"type": "json_object"}` — observe the output
@@ -236,6 +259,10 @@ Use `tokio`, `hyper` or `axum`, and `reqwest`. Set up a Cargo workspace in `src/
 ---
 
 ### 2.2 — Request Queuing & Admission Control
+
+**Reading list:**
+- [Performance Under Load — Netflix](https://netflixtechblog.medium.com/performance-under-load-3e6fa9a60581) — adaptive concurrency limiting in production (you'll implement a version of this in 2.7)
+- [Little's Law](https://en.wikipedia.org/wiki/Little%27s_law) — the fundamental relationship between throughput, concurrency, and latency: L = λW. Useful for reasoning about queue sizing
 
 Add a bounded queue in front of the backend.
 
@@ -339,6 +366,10 @@ Track in-flight requests per backend. Route to the one with the fewest.
 
 ### 3.5 — Prefix-Aware Routing
 
+**Reading list:**
+- [Consistent Hashing and Random Trees](https://www.cs.princeton.edu/courses/archive/fall09/cos518/papers/chash.pdf) — the original consistent hashing paper (short, readable)
+- [Prompt Cache: Modular Attention Reuse for Low-Latency Inference](https://arxiv.org/abs/2311.04934) — how prefix-aware routing improves cache hit rates in multi-server setups
+
 Route requests with the same system prompt to the same backend to maximize KV cache hits.
 
 - Consistent hash on system message content
@@ -434,6 +465,10 @@ vLLM exposes the same OpenAI-compatible API. Point your benchmark script at it.
 
 Research speculative decoding — a technique for faster inference without quality loss.
 
+**Reading list:**
+- [Fast Inference from Transformers via Speculative Decoding](https://arxiv.org/abs/2211.17192) — the original speculative decoding paper
+- [Speculative Decoding — Hugging Face](https://huggingface.co/blog/whisper-speculative-decoding) — accessible explainer with diagrams of the draft-verify loop
+
 **Local experiment:** llama-server supports speculative decoding via the `--draft` flag. Download a smaller model (e.g., Llama 3.2 1B as draft for a 3B target). Run `llama-server -m <3B-model> --draft <1B-model> -nd <num-draft-tokens>` and benchmark against the 3B model alone. Measure tokens/sec and observe the acceptance rate in the logs.
 
 If you only have the 1B model, you can still experiment: llama.cpp also supports self-speculative decoding (`--draft-self`) where the model drafts for itself using fewer layers. Try it and measure the impact.
@@ -477,6 +512,10 @@ Questions: what are the operational trade-offs? (startup time, resource usage, s
 
 ### 5.3 — Autoscaling Signals
 
+**Reading list:**
+- [Prometheus Exposition Format](https://prometheus.io/docs/instrumenting/exposition_formats/) — the format your `/metrics` endpoint should produce
+- [Autopilot: Workload Autoscaling at Google Scale](https://research.google/pubs/autopilot-workload-autoscaling-at-google-scale/) — how Google autoscales ML workloads (the kind of system you'd build at Anthropic)
+
 Expose a `/metrics` endpoint (Prometheus format) reporting:
 - Request queue depth
 - In-flight requests per backend
@@ -501,7 +540,14 @@ Implement a simple autoscaler controller:
 
 > **Format:** Research + local simulation
 
-You're deploying a new model version to a fleet serving production traffic. Research and design strategies for:
+You're deploying a new model version to a fleet serving production traffic.
+
+**Reading list:**
+- [Kubernetes Deployment Strategies](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#strategy) — blue/green and rolling updates in the system you'd likely use in production
+- [Canary Releases — Martin Fowler](https://martinfowler.com/bliki/CanaryRelease.html) — concise overview of the pattern
+- [Safe model deployment at Anthropic](https://docs.anthropic.com/en/docs/about-claude/models) — observe how Anthropic versions models (claude-3-5-sonnet-20241022 etc.) and think about what that implies for deployment infrastructure
+
+Research and design strategies for:
 
 1. **Blue/green deployment** — how do you cut over from model v1 to v2?
 2. **Canary deployment** — how do you gradually shift traffic to the new model?
@@ -527,6 +573,12 @@ You're deploying a new model version to a fleet serving production traffic. Rese
 > **Format:** Research + local simulation
 
 Research how large models are served across multiple GPUs and accelerator types.
+
+**Reading list:**
+- [Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism](https://arxiv.org/abs/1909.08053) — introduces tensor and pipeline parallelism (training paper, but the same sharding applies to inference)
+- [Efficiently Scaling Transformer Inference](https://arxiv.org/abs/2211.05102) — Google's analysis of how to partition models across TPUs for inference, covers all parallelism strategies
+- [How GPUs Work — Nvidia](https://developer.nvidia.com/blog/cuda-refresher-reviewing-the-origins-of-gpu-computing/) — foundational GPU architecture if you need it
+- [AWS Trainium / Inferentia overview](https://aws.amazon.com/machine-learning/trainium/) — an example of a non-GPU accelerator to understand what "hardware-agnostic" means in practice
 
 **Local simulation:** You can't run multi-GPU tensor parallelism locally (without multiple GPUs), but you can simulate **pipeline parallelism** at the gateway level. llama-server's `-ngl` flag controls how many layers are offloaded to GPU (or in CPU-only mode, you can think of it as a layer split). Run two llama-server instances and imagine they each hold half the model layers — your gateway would need to chain them (request → instance 1 → instance 2 → response). Build a simple pipeline proxy that forwards through two backends sequentially and measure the latency overhead vs a single backend. This is a toy version of pipeline parallelism's communication cost.
 
