@@ -174,27 +174,25 @@ Key response fields: `choices[0].message.content` (non-streaming), `choices[0].d
 
 ---
 
-## Part 1: Build and Understand a Single Inference Server
+## Part 1: Understand a Single Inference Server
 
-### 1.1 — Build llama.cpp from Source
+### 1.1 — Run llama-server
 
-Clone [llama.cpp](https://github.com/ggerganov/llama.cpp) and build it. Focus on `llama-server`.
+The [llama.cpp](https://github.com/ggerganov/llama.cpp) project provides `llama-server` — an inference server with an OpenAI-compatible API. Use a prebuilt Docker image to get it running:
 
-**Acceptance criteria:**
-- `llama-server --help` works
-- You understand these build flags: `-DGGML_CUDA=ON`, `-DGGML_METAL=ON`, `-DGGML_CPU_ALL_VARIANTS=ON`
-- You can explain: what is GGML? How does it relate to llama.cpp? What computation backends does it support?
+```bash
+docker run -p 8081:8081 ghcr.io/ggerganov/llama.cpp:server -m /path/to/model.gguf --host 0.0.0.0 --port 8081
+```
 
----
+You'll need to download a GGUF model file from Hugging Face (same Llama 3.2 1B Q8_0 you used with Model Runner). Mount it into the container.
 
-### 1.2 — Serve a Model
-
-Download the same model you used with Model Runner (Llama 3.2 1B, Q8_0 quantization) as a GGUF file from Hugging Face. Start `llama-server` with it.
+> **Side note:** llama.cpp can be [built from source](https://github.com/ggerganov/llama.cpp?tab=readme-ov-file#build) with `cmake`. Build flags like `-DGGML_CUDA=ON` and `-DGGML_METAL=ON` enable GPU backends. Interesting to explore later but not the focus here — you're learning the serving layer, not the compute kernels.
 
 **Acceptance criteria:**
 - `llama-server` running on port 8081
 - Same curl commands work against both Model Runner (:12434) and your server (:8081)
 - Run your bench tool from 0.5 against both — compare numbers
+- You can explain: what is GGML? What's the relationship between llama.cpp, GGML, and GGUF?
 
 ---
 
@@ -302,13 +300,13 @@ How long does it take for llama-server to start serving after launch? This is op
 
 ### 1.8 — Containerize llama-server
 
-Write a Dockerfile that builds llama.cpp from source. Model files should be mounted at runtime, not baked in.
+Write a `docker-compose.yml` that runs llama-server using the prebuilt image. The model GGUF file should be provided via a volume mount, not baked in.
 
 **Acceptance criteria:**
-- `docker build -t llama-server .` succeeds
-- `docker run -v /path/to/models:/models -p 8081:8081 llama-server -m /models/<model>.gguf --host 0.0.0.0 --port 8081` serves requests
-- Pinned base image and llama.cpp commit for reproducibility
-- You can answer: why volume-mount models instead of COPY? (hint: image size, model versioning, multi-model serving)
+- `docker compose up -d` starts llama-server and it serves requests
+- Model file is mounted from a local directory
+- You can swap models by changing the mount path and command args — no image rebuild needed
+- You can answer: why volume-mount models instead of baking them in? (hint: image size, model versioning, multi-model serving)
 
 ---
 
