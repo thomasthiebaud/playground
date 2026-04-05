@@ -7,12 +7,13 @@ A monorepo for hands-on systems engineering experiments. Each project is self-co
 | Project | Description |
 |---------|-------------|
 | [llm-local-inference](projects/llm-local-inference/) | Zero-to-hero LLM inference — transformer mechanics, llama.cpp, batching, routing, fleet orchestration |
+| [buck2-go-rules](projects/buck2-go-rules/) | Write custom Buck2 rules (`go_binary`, `go_library`, `go_test`) from scratch to build Go code |
 
 ## Future Work
 
 | Item | Notes |
 |------|-------|
-| Buck2 Go toolchain | Set up `go_binary`/`go_library` rules so projects can use native Go targets instead of `genrule` shelling out to `go build` |
+| ~~Buck2 Go toolchain~~ | Done — see [buck2-go-rules](projects/buck2-go-rules/) |
 
 ## Setup
 

@@ -1,0 +1,2 @@
+# Buck2 Go rules — build targets go here.
+# Start with Exercise 0 (genrule), then replace with custom rules.
