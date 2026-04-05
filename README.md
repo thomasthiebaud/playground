@@ -6,7 +6,7 @@ A monorepo for hands-on systems engineering experiments. Each project is self-co
 
 | Project | Description |
 |---------|-------------|
-| [llm-inference-gateway](projects/llm-inference-gateway/) | LLM inference optimization, load balancing, and traffic management using Ollama |
+| [llm-local-inference](projects/llm-local-inference/) | Zero-to-hero LLM inference — transformer mechanics, llama.cpp, batching, routing, fleet orchestration |
 
 ## Future Work
 
