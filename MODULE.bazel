@@ -1,0 +1,41 @@
+module(
+    name = "playground",
+    version = "0.0.0",
+)
+
+# ─── Core rule sets ───────────────────────────────────────────────────────────
+
+bazel_dep(name = "rules_rust", version = "0.69.0")
+bazel_dep(name = "rules_python", version = "1.9.0")
+
+# ─── Hermetic Rust toolchain ──────────────────────────────────────────────────
+# Bazel downloads this automatically — no rustup required.
+
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(edition = "2021", versions = ["1.82.0"])
+use_repo(rust, "rust_toolchains")
+
+register_toolchains("@rust_toolchains//:all")
+
+# ─── Hermetic Python toolchain ────────────────────────────────────────────────
+# Bazel downloads this automatically — no system Python required for build rules.
+# Note: genrule targets that call pip-installed packages (torch, transformers, etc.)
+# still use the system Python; see .bazelrc for the --spawn_strategy setting.
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(python_version = "3.11", is_default = True)
+
+# ─── Third-party Rust crates ──────────────────────────────────────────────────
+# Crates are declared in third-party/rust/Cargo.toml.
+# To add a crate:
+#   1. Uncomment (or add) it in third-party/rust/Cargo.toml
+#   2. CARGO_BAZEL_REPIN=1 bazel build <your target>  ← updates Cargo.lock and fetches the crate
+# Reference crates in BUILD files as @crates//:cratename
+
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//third-party/rust:Cargo.lock",
+    manifests = ["//third-party/rust:Cargo.toml"],
+)
+use_repo(crate, "crates")

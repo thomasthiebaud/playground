@@ -1,0 +1,5 @@
+# Print test output on failure.
+test --test_output=errors
+
+# Enable bzlmod (default in Bazel 7+, explicit here for clarity).
+common --enable_bzlmod
